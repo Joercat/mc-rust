@@ -71,6 +71,10 @@ glue into `public/`.
 
 ## Known limitations
 
+- The renderer needs **WebGPU** (Chrome/Edge 113+, Safari 26, Firefox with
+  `dom.webgpu.enabled`). The WebGL2 fallback (`?backend=webgl`) only works
+  when the browser has `WEBGL_draw_instanced_base_vertex_base_instance`;
+  otherwise the page says so before starting instead of panicking mid-world.
 - Software WebGPU (SwiftShader) renders a frame in ~300 ms; a real GPU adapter
   is far faster. The FPS readout reflects that.
 - The page must be cross-origin isolated (`COOP: same-origin`,

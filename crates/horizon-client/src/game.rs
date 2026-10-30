@@ -16331,6 +16331,37 @@ pub fn web_status_json() -> String {
         .unwrap_or_else(|| "{\"state\":\"booting\"}".to_owned())
 }
 
+/// Whether this browser's WebGL2 can draw instanced with a base vertex (the
+/// extension wgpu's GL backend needs for every Horizon draw).
+#[cfg(target_arch = "wasm32")]
+fn webgl_base_vertex() -> bool {
+    use wasm_bindgen::JsCast;
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return false;
+    };
+    let Ok(canvas) = doc.create_element("canvas").map(|e| e.unchecked_into::<web_sys::HtmlCanvasElement>())
+    else {
+        return false;
+    };
+    let Some(context) = canvas
+        .get_context("webgl2")
+        .ok()
+        .flatten()
+        .filter(|c| !c.is_null() && !c.is_undefined())
+    else {
+        return false;
+    };
+    let name = "WEBGL_draw_instanced_base_vertex_base_instance";
+    js_sys::Reflect::get(&context, &wasm_bindgen::JsValue::from_str("getExtension"))
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .and_then(|f| {
+            f.call1(&context, &wasm_bindgen::JsValue::from_str(name))
+                .ok()
+        })
+        .is_some_and(|ext| !ext.is_null() && !ext.is_undefined())
+}
+
 #[cfg(target_arch = "wasm32")]
 pub async fn run_web(
     canvas_id: &str,
@@ -16446,6 +16477,17 @@ pub async fn run_web(
     } else {
         early_settings.horizon.api
     };
+    // A WebGL2-only browser drives wgpu's GL backend, which draws with
+    // `drawElementsInstancedBaseVertex`: without that extension (and only
+    // then) a frame would panic mid-world. Say so before the game starts.
+    if api == horizon_client::graphics::GraphicsApi::OpenGl && !webgl_base_vertex() {
+        return Err(
+            "this browser has no WebGPU, and its WebGL2 lacks \
+             WEBGL_draw_instanced_base_vertex_base_instance, which Horizon's renderer needs; \
+             try a browser with WebGPU (Chrome, Edge, Safari 26)"
+                .to_owned(),
+        );
+    }
     log::info!("Horizon Web: opening WebGPU/WebGL2 device ({api:?})...");
     horizon_client::gfx::preopen_web_device(&window, api, loaded.pack.render.texture_layers)
     .await
