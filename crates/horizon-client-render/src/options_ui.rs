@@ -1879,13 +1879,16 @@ impl OptionsUi {
                     list: false,
                 });
                 out.push(option_widget(s, Opt::Fov, cx - 154.0, 29.0, 150.0));
-                out.push(button(
-                    cx + 4.0,
-                    29.0,
-                    150.0,
-                    tr("options.online"),
-                    Act::Push(Page::Online),
-                ));
+                // The web build has no online features: it has no Online page.
+                if !cfg!(target_arch = "wasm32") {
+                    out.push(button(
+                        cx + 4.0,
+                        29.0,
+                        150.0,
+                        tr("options.online"),
+                        Act::Push(Page::Online),
+                    ));
+                }
                 let entries = [
                     ("options.skinCustomisation", Some(Page::Skin)),
                     ("options.sounds", Some(Page::Sound)),
