@@ -1084,6 +1084,12 @@ impl Game<'_> {
     }
 
     pub(super) fn lan_open(&mut self, settings: LanSettings) -> Result<()> {
+        if cfg!(target_arch = "wasm32") {
+            // Online play is off in the browser build: no listener to open.
+            let _ = settings;
+            log::warn!("Horizon Web: opening the world to LAN needs a network the browser does not have");
+            return Ok(());
+        }
         let port = if let Some(server) = &self.integrated {
             // ShareToLanScreen: IntegratedServer.publishServer.
             server

@@ -77,5 +77,6 @@ glue into `public/`.
   `COEP: require-corp`) for WebGPU/SharedArrayBuffer; `serve_web.py` sets both.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
-- Autosave writes the player only every 6000 ticks (5 minutes) like vanilla;
-  Save and Quit to Title, or closing the page, saves immediately.
+- The autosave runs every 1200 ticks (a minute) in the browser instead of
+  vanilla's 6000, because a page can be closed between saves; the page also
+  mirrors its files to IndexedDB when it is hidden or unloaded.

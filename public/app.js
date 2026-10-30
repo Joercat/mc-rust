@@ -165,6 +165,14 @@ async function boot() {
       console.warn("persist failed", e);
     }
   }, 3000);
+  // Also on the way out: a hidden or closing page gets one last write.
+  const flush = () => {
+    persist(db).catch(() => {});
+  };
+  window.addEventListener("pagehide", flush);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flush();
+  });
   setInterval(() => {
     try {
       const status = JSON.parse(wasm.horizon_web_status());

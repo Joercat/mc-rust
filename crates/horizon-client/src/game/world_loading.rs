@@ -279,6 +279,12 @@ pub(super) fn preload_world_data(
     resources: &std::path::Path,
     registry: &'static horizon_world::registry::BlockRegistry,
 ) {
+    if cfg!(target_arch = "wasm32") {
+        // A browser page has no helper thread to read on, and a world opening
+        // reads the same data itself: nothing to do.
+        let _ = (on_world_screens, resources, registry);
+        return;
+    }
     let mut preload = PRELOAD.lock().unwrap_or_else(|e| e.into_inner());
     match &mut *preload {
         Preload::Used => {}
