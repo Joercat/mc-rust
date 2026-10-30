@@ -28,7 +28,9 @@ services need sockets and threads a browser page does not have, so:
 
 - the title screen shows only **Singleplayer** and **Options**;
 - `Game::connect_server` returns immediately with a warning instead of starting
-  a network session (`crates/horizon-client/src/game/remote.rs`).
+  a network session (`crates/horizon-client/src/game/remote.rs`), and Open to
+  LAN does nothing (`game/lan.rs`);
+- Options has no **Online** page and the pause menu no server links.
 
 Singleplayer worlds (an integrated server in the same page) work exactly as on
 the desktop.
