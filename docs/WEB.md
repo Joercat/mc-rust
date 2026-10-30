@@ -68,8 +68,9 @@ The pieces, in build order:
    extracts them (from Pumpkin's generated entity table) and
    `scripts/fill_attribute_defaults.py` merges them into an existing archive.
 
-`scripts/build_web.sh` runs the wasm build, `wasm-bindgen`, and copies the
-glue into `public/`.
+`scripts/build_web.sh` runs the wasm build, `wasm-bindgen`
+(`crates/horizon-wasm-bindgen`, a wrapper around `wasm-bindgen-cli-support`),
+and copies the glue into `public/`.
 
 ## Known limitations
 

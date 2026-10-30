@@ -27,16 +27,14 @@ export RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C debuginfo=1 -C link-arg=-
 cargo build --offline --profile "$PROFILE" --target wasm32-unknown-unknown \
   -p horizon-client --bin horizon-client
 
-# The wasm-bindgen CLI is built once from the wasm-bindgen 0.2.129 sources
-# (crates/cli); it has to match the crate the engine links against.
+# The wasm-bindgen CLI (`crates/horizon-wasm-bindgen`, which wraps
+# wasm-bindgen-cli-support) has to match the crate the engine links against.
 if [ ! -x "$WRAPPER" ]; then
-  CLI_SRC="${WASM_BINDGEN_CLI_SRC:-/tmp/horizon-gh-cache/extra__wasm-bindgen__wasm-bindgen__0.2.129/crates/cli}"
-  cargo build --offline --release --manifest-path "$CLI_SRC/Cargo.toml"
-  WRAPPER="$TARGET_DIR/release/wasm-bindgen"
+  cargo build --offline --release -p horizon-wasm-bindgen --bin wasm-bindgen
 fi
 
 OUT="$TARGET_DIR/wasm-bindgen-web"
-"$WRAPPER" --target web --no-typescript --out-dir "$OUT" --out-name horizon-client "$WASM"
+"$WRAPPER" --target web --no-typescript --out-dir "$OUT" "$WASM"
 cp "$OUT/horizon-client.js" "$OUT/horizon-client_bg.wasm" public/
 
 echo "published public/horizon-client.js and public/horizon-client_bg.wasm"
