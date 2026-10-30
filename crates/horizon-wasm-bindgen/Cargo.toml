@@ -1,0 +1,11 @@
+[package]
+name = "horizon-wasm-bindgen"
+version = "0.2.129"
+edition = "2021"
+
+[[bin]]
+name = "wasm-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+wasm-bindgen-cli-support = "0.2.129"

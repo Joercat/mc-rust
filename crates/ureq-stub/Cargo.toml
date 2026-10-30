@@ -1,0 +1,9 @@
+[package]
+name = "ureq"
+version = "2.12.1"
+edition = "2021"
+
+[features]
+default = []
+tls = []
+json = []

@@ -1,0 +1,11 @@
+[package]
+name = "horizon-web-prepare"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+horizon-core = { path = "../horizon-core" }
+horizon-world = { path = "../horizon-world" }
+horizon-client-render = { path = "../horizon-client-render" }
+horizon-client = { path = "../horizon-client" }
+serde_json = "1"

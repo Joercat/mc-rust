@@ -1,0 +1,57 @@
+[workspace]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "crates/horizon-prepare", "crates/horizon-bots", "crates/horizon-bench", "crates/horizon-relay", "crates/cargo-horizon-mod", "crates/horizon-port-pack", "xtask"]
+members = [
+    "crates/horizon-core",
+    "crates/horizon-dualsense",
+    "crates/horizon-threads",
+    "crates/horizon-hdr",
+    "crates/horizon-world",
+    "crates/horizon-client",
+    "crates/horizon-web-prepare",
+    "crates/horizon-client-core",
+    "crates/horizon-client-input",
+    "crates/horizon-client-render",
+    "crates/horizon-command",
+    "crates/horizon-items",
+    "crates/horizon-server-files",
+    "crates/horizon-server",
+    "crates/horizon-assets",
+    "crates/horizon-protocol",
+    "crates/horizon-theme",
+    "crates/horizon-telemetry",
+    "crates/horizon-friends",
+    "crates/horizon-mods",
+    "crates/horizon-shaders",
+    "crates/horizon-shader-api",
+    "crates/horizon-release-sign",
+    "crates/ureq-stub",
+    "crates/horizon-wasm-bindgen",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+large_enum_variant = "allow"
+
+[patch.crates-io]
+ureq = { path = "crates/ureq-stub" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

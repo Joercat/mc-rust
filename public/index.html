@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Horizon 26.3 — Web</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; width: 100%; height: 100%;
+        background: #0a0a0c; overflow: hidden;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: #d8dce6;
+      }
+      #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+      #boot {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 18px;
+        background: radial-gradient(circle at 50% 35%, #1b2230 0%, #08090b 70%);
+        z-index: 20; transition: opacity 600ms ease;
+      }
+      #boot.hidden { opacity: 0; pointer-events: none; }
+      .title { font-size: 34px; letter-spacing: 3px; font-weight: 700; color: #f2f4f8; }
+      .sub { font-size: 13px; letter-spacing: 1px; color: #8e97a8; text-transform: uppercase; }
+      #bar { width: min(420px, 70vw); height: 6px; border-radius: 3px; background: #1d2430; overflow: hidden; }
+      #bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #4f8cff, #7bd0ff); transition: width 200ms ease; }
+      #phase { font-size: 12.5px; color: #9aa4b6; min-height: 18px; }
+      #log {
+        width: min(760px, 88vw); height: 132px; overflow: hidden; font-size: 11.5px;
+        line-height: 1.5; color: #6b7486; white-space: pre-wrap;
+      }
+      #hud {
+        position: fixed; right: 10px; bottom: 10px; z-index: 15;
+        font-size: 11px; line-height: 1.45; text-align: right;
+        color: #9fb0c8; background: rgba(8, 10, 14, 0.55);
+        padding: 6px 9px; border-radius: 6px; pointer-events: none;
+        opacity: 0; transition: opacity 300ms ease;
+      }
+      #error {
+        position: fixed; inset: 0; z-index: 40; display: none;
+        padding: 40px; overflow: auto; background: #25090c; color: #ffd7d7;
+        font-size: 13px; white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="horizon-canvas" tabindex="0"></canvas>
+    <div id="boot">
+      <div class="title">HORIZON</div>
+      <div class="sub">Minecraft 26.3 · offline web build</div>
+      <div id="bar"><i></i></div>
+      <div id="phase">starting…</div>
+      <div id="log"></div>
+    </div>
+    <div id="hud"></div>
+    <pre id="error"></pre>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+[package]
+name = "horizon-friends"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+horizon-core = { path = "../horizon-core" }
