@@ -80,10 +80,10 @@ and copies the glue into `public/`.
   otherwise the page says so before starting instead of panicking mid-world.
 - Software WebGPU (SwiftShader) renders a frame in ~300 ms; a real GPU adapter
   is far faster. The FPS readout reflects that.
-- The page must be cross-origin isolated (`COOP: same-origin`,
-  `COEP: require-corp`) for WebGPU/SharedArrayBuffer; `serve_web.py` sets both.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
-- The autosave runs every 1200 ticks (a minute) in the browser instead of
-  vanilla's 6000, because a page can be closed between saves; the page also
-  mirrors its files to IndexedDB when it is hidden or unloaded.
+- The autosave runs every 200 ticks (ten seconds) in the browser instead of
+  vanilla's 6000, because a page can be closed or navigated away from between
+  saves. Hiding the page also asks the game for an immediate save, and the page
+  mirrors its files to IndexedDB every three seconds and when it unloads, so a
+  reload lands on the position the player left.

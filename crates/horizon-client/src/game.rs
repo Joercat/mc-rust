@@ -5367,10 +5367,11 @@ impl Game<'_> {
             self.world.weather.tick_levels();
             self.tick_weather_effects();
         }
-        // The autosave: every five minutes as in the game, and every minute in
-        // a browser, where a page can be closed without the save a quit runs.
+        // The autosave: every five minutes as in the game, and every ten
+        // seconds in a browser, where a page can be closed (or navigated away
+        // from) without the save a quit runs.
         #[cfg(target_arch = "wasm32")]
-        let autosave_ticks = 1200;
+        let autosave_ticks = 200;
         #[cfg(not(target_arch = "wasm32"))]
         let autosave_ticks = 6000;
         self.autosaving = self.ticks.is_multiple_of(autosave_ticks);
