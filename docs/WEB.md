@@ -68,6 +68,12 @@ The pieces, in build order:
    extracts them (from Pumpkin's generated entity table) and
    `scripts/fill_attribute_defaults.py` merges them into an existing archive.
 
+The page checks for `public/horizon-client.js`,
+`public/horizon-client_bg.wasm` and `public/horizon-vfs.bin` before it starts
+and, when they are absent (they are build outputs and gitignored, so a fresh
+checkout has none), says which ones are missing and how to build them instead
+of hanging on the loading screen.
+
 `scripts/build_web.sh` runs the wasm build, `wasm-bindgen`
 (`crates/horizon-wasm-bindgen`, a wrapper around `wasm-bindgen-cli-support`),
 and copies the glue into `public/`.

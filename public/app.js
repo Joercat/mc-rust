@@ -1,8 +1,6 @@
 // Horizon 26.3 web host: mounts the resource VFS pack, restores the player's
 // `/game` folder from IndexedDB, starts the real Horizon client, then keeps the
 // browser's storage in sync with the files the game writes.
-import init, * as wasm from "./horizon-client.js";
-
 const bootEl = document.getElementById("boot");
 const barEl = document.querySelector("#bar > i");
 const phaseEl = document.getElementById("phase");
@@ -26,6 +24,47 @@ function fail(err) {
   errorEl.style.display = "block";
   errorEl.textContent = `Horizon failed to start:\n\n${message}`;
   console.error(err);
+}
+
+// The engine, its glue and the resource pack are build outputs
+// (`scripts/build_web.sh`, `scripts/pack_vfs.py`), not source: a fresh checkout
+// has none of them. A static import would fail before a line of this file ran
+// and leave the page on "starting…" forever, so they are loaded here, where a
+// missing build can name the files it wants.
+let wasm = null;
+let init = null;
+const ARTIFACTS = [
+  ["./horizon-client.js", "the wasm-bindgen glue"],
+  ["./horizon-client_bg.wasm", "the compiled client"],
+  ["./horizon-vfs.bin", "the resource pack"],
+];
+
+async function loadEngine() {
+  const missing = [];
+  for (const [path, what] of ARTIFACTS) {
+    try {
+      // Only a definite "no such file" counts: a host that refuses HEAD
+      // (405) or answers with something else must not read as a missing build.
+      const response = await fetch(new URL(path, import.meta.url), { method: "HEAD" });
+      if (response.status === 404 || response.status === 410) {
+        missing.push(`  ${path.slice(2)} — ${what} (HTTP ${response.status})`);
+      }
+    } catch (error) {
+      missing.push(`  ${path.slice(2)} — ${what} (${error})`);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      "The web build's files are missing from ./public:\n\n" +
+        missing.join("\n") +
+        "\n\nThey are build outputs, not source. Build them with:\n" +
+        "  scripts/build_web.sh\n\n" +
+        "(needs the wasm32 Rust toolchain; see docs/WEB.md for the prerequisites)",
+    );
+  }
+  const module = await import("./horizon-client.js");
+  wasm = module;
+  init = module.default;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +156,9 @@ async function persist(db) {
 }
 
 async function boot() {
-  phase("loading engine…", 0.02);
+  phase("looking for the engine…", 0.01);
+  await loadEngine();
+  phase("loading engine…", 0.03);
   const wasmUrl = new URL("./horizon-client_bg.wasm", import.meta.url);
   await init({ module_or_path: wasmUrl });
   say("wasm engine ready");
