@@ -20,9 +20,10 @@ WRAPPER="$TARGET_DIR/release/wasm-bindgen"
 
 # `--cfg getrandom_backend="wasm_js"`: getrandom's wasm backend. The stack is
 # raised from the 1 MB default: world generation and the mesher recurse.
+# Symbols are stripped: the module is 33 MB instead of 42, and ~11 MB gzipped.
 export PATH="$RUST_PREFIX/bin:$PATH"
 export CARGO_TARGET_DIR="$TARGET_DIR"
-export RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C debuginfo=1 -C link-arg=-zstack-size=8388608'
+export RUSTFLAGS='--cfg getrandom_backend="wasm_js" -C debuginfo=0 -C strip=symbols -C link-arg=-zstack-size=8388608'
 
 cargo build --offline --profile "$PROFILE" --target wasm32-unknown-unknown \
   -p horizon-client --bin horizon-client

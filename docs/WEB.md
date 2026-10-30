@@ -2,9 +2,9 @@
 
 The real Horizon client (the Rust Minecraft client in this repository) built as
 a WebAssembly module and served in the browser. Nothing is installed: the page
-loads the engine (a 42 MB wasm module), a 33 MB resource pack, and the game
-runs the same code paths as the desktop build — world generation, terrain
-meshing, entities, the HUD, the menus, and saving to browser storage.
+loads the engine (a 33 MB wasm module, ~11 MB gzipped), a 33 MB resource pack,
+and the game runs the same code paths as the desktop build — world generation,
+terrain meshing, entities, the HUD, the menus, and saving to browser storage.
 
 ```sh
 python3 scripts/serve_web.py 5173     # then open http://localhost:5173/
