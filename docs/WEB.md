@@ -82,8 +82,59 @@ and copies the glue into `public/`.
   is far faster. The FPS readout reflects that.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
+- The build is single-threaded (see *Threads* above): terrain streams in on the
+  render thread, so walking into unloaded chunks costs frames.
 - The autosave runs every 200 ticks (ten seconds) in the browser instead of
   vanilla's 6000, because a page can be closed or navigated away from between
   saves. Hiding the page also asks the game for an immediate save, and the page
   mirrors its files to IndexedDB every three seconds and when it unloads, so a
   reload lands on the position the player left.
+
+## Threads (single-threaded today)
+
+The browser build runs on one thread. The desktop client generates, lights and
+meshes chunks on a pool of worker threads, loads its resources in parallel and
+builds a world on its own thread; the web build does all of that on the thread
+that also draws. The cost is not the steady frame (a still scene is fine) but
+the edges:
+
+- `Streaming::pump_inline` spends up to 24 ms per frame generating and meshing
+  while a world loads and 10 ms otherwise (`horizon-client-render/src/streaming.rs`),
+  out of a 16.7 ms frame;
+- `load_resources` uses one thread (`game.rs`), so the first load reads
+  thousands of textures and models serially;
+- `WorldLoader` runs its prepare step inline (`game/world_loading.rs`);
+- `par::par_map` maps serially (`horizon-client-render/src/par.rs`).
+
+These are `#[cfg(target_arch = "wasm32")]` branches, and they are not there to
+be conservative: `std::thread` does not work on `wasm32-unknown-unknown` at all.
+Its platform layer is `library/std/src/sys/pal/wasm/mod.rs`, which is
+`#[path = "../unsupported/common.rs"]` — every OS call is a stub that returns
+`Unsupported`, which is where the "operation not supported on this platform"
+messages come from. There is no `Thread` behind `std::thread::spawn` to enable.
+
+Real threads need three things:
+
+1. **A standard library built with atomics.** Rust ships `wasm32-unknown-unknown`
+   without them, so the module has to be built with nightly
+   `-Z build-std=std,panic_abort` and
+   `RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals'`, plus
+   `-C link-arg=--import-memory -C link-arg=--shared-memory` so every instance
+   shares one `SharedArrayBuffer`. `wasm-bindgen` then rewrites the module for
+   threads by itself (it detects the shared, imported memory).
+2. **A worker pool**, because std will not spawn one: N Web Workers, each
+   instantiating the same module with the same memory and entering a Rust entry
+   point that runs the job loop. That is what the `wasm_thread` and
+   `wasm-bindgen-rayon` crates do; the chunk streamer's existing `Shared` job
+   queue (mutex + condvar + mailbox) would work unchanged on the other side,
+   since all of that state is in the shared heap.
+3. **No blocking waits on the main thread.** `Atomics.wait` is illegal there,
+   so the render thread has to keep polling (`try_recv`, as the inline path
+   already does) while only the workers block.
+
+Cross-origin isolation is already in place (`serve_web.py` sends `COOP:
+same-origin` and `COEP: require-corp`), which is what makes `SharedArrayBuffer`
+available in the first place. A threaded build cannot run without it, so the
+plan is to ship both modules and have `public/app.js` pick the threaded one
+when `crossOriginIsolated && typeof SharedArrayBuffer !== "undefined"`, and the
+single-threaded one otherwise.
