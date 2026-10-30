@@ -135,6 +135,13 @@ mod web_entry {
         crate::game::web_status_json()
     }
 
+    /// Ask the game to save the world (the page is hidden or closing).
+    #[wasm_bindgen]
+    pub fn horizon_web_request_save() {
+        install_hooks();
+        crate::game::request_web_save();
+    }
+
     #[wasm_bindgen]
     pub async fn horizon_web_start(
         canvas_id: String,

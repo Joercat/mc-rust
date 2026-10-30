@@ -14211,6 +14211,18 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The page asked for a save (it is being hidden or unloaded): write
+        // the world now, so the host can mirror it to browser storage.
+        if take_web_save_request()
+            && self.pending_save.is_none()
+            && self.title.is_none()
+            && self.player.is_some()
+        {
+            log::info!("Horizon Web: saving at the page's request");
+            if let Err(error) = self.save_game() {
+                log::warn!("Horizon Web: the requested save failed: {error}");
+            }
+        }
         if horizon_threads::stop_requests() > 0
             && self.pending_save.as_ref().is_none_or(|save| !save.quit)
         {
@@ -16228,6 +16240,27 @@ static WEB_STATUS_BUF: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync
 #[cfg(target_arch = "wasm32")]
 static WEB_LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Set by `horizon_web_request_save` when the page is hidden or unloaded.
+#[cfg(target_arch = "wasm32")]
+static WEB_SAVE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks the next frame to save the world (a hidden or closing page).
+#[cfg(target_arch = "wasm32")]
+pub fn request_web_save() {
+    WEB_SAVE_REQUEST.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a save was requested, clearing the request.
+#[cfg(target_arch = "wasm32")]
+fn take_web_save_request() -> bool {
+    WEB_SAVE_REQUEST.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn take_web_save_request() -> bool {
+    false
+}
+
 /// Records the last error a frame reported, answering whether it is new.
 #[cfg(target_arch = "wasm32")]
 fn update_web_error(message: &str) -> bool {
@@ -16375,12 +16408,13 @@ pub async fn run_web(
         .map_err(|_| format!("#{canvas_id} is not an HtmlCanvasElement"))?;
 
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    // No inner size: winit would freeze the canvas's CSS box at the size the
+    // page booted with, and the game would keep drawing that size in a corner
+    // when the window changes. Without it the canvas keeps the page's CSS
+    // (index.html sizes it to the viewport) and its ResizeObserver reports
+    // every change, so the renderer follows the window.
     let attrs = Window::default_attributes()
         .with_title("Horizon 26.3")
-        .with_inner_size(winit::dpi::LogicalSize::new(
-            f64::from(options.window_size[0]),
-            f64::from(options.window_size[1]),
-        ))
         .with_canvas(Some(canvas));
     #[allow(deprecated)]
     let window = Arc::new(

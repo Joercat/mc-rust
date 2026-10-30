@@ -165,8 +165,13 @@ async function boot() {
       console.warn("persist failed", e);
     }
   }, 3000);
-  // Also on the way out: a hidden or closing page gets one last write.
+  // Also on the way out: ask the game for a save, then mirror it.
   const flush = () => {
+    try {
+      wasm.horizon_web_request_save();
+    } catch (e) {
+      /* the game is not running */
+    }
     persist(db).catch(() => {});
   };
   window.addEventListener("pagehide", flush);
