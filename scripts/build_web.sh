@@ -93,9 +93,22 @@ THREAD_KEY="$(thread_key_for "$NIGHTLY" "$THREAD_VERSION")"
 THREAD_TARGET_DIR="$THREADS_DIR_ROOT/$THREAD_KEY"
 mkdir -p "$THREADS_DIR_ROOT"
 
+# Write the committed lock back without `git checkout`: that needs the index,
+# and a stale `index.lock` in a worktree would abort this whole script.
+restore_lock() {
+  git show HEAD:Cargo.lock > Cargo.lock 2>/dev/null || true
+}
+
+# A `rustc-wrapper` (sccache and friends) set in someone's `~/.cargo/config.toml`
+# is invisible to the environment and can hand back objects compiled against a
+# different `core`, which is `E0152` on the first std dependency. This build does
+# not use a wrapper, so switch both off explicitly; the flag is harmless where
+# none is configured.
+THREAD_CARGO_FLAGS=(--config 'build.rustc-wrapper=""' --config 'build.rustc-workspace-wrapper=""')
+
 threaded_cargo() {
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
-    cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
+    cargo +"$NIGHTLY" "${THREAD_CARGO_FLAGS[@]}" build -Z build-std=std,panic_abort --offline \
       --profile "$PROFILE" --target wasm32-unknown-unknown \
       -p horizon-client --bin horizon-client 2>&1 | tee "$LOG"
 }
@@ -118,7 +131,7 @@ diagnose_lang_item() {
   # line. Keep the whole thing: it is also the only place the cfg-if unit id of
   # *this* build appears, and its source path names the version.
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
-    cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
+    cargo +"$NIGHTLY" "${THREAD_CARGO_FLAGS[@]}" build -Z build-std=std,panic_abort --offline \
       --profile "$PROFILE" --target wasm32-unknown-unknown \
       -p horizon-client --bin horizon-client -v >"$verbose" 2>&1 || true
   line="$(grep -m1 -- '--crate-name dlmalloc' "$verbose" || true)"
@@ -219,7 +232,7 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
       echo "note: Cargo.lock differs from the commit; building from the committed one" >&2
       echo "      (the working copy is saved as $TARGET_DIR/Cargo.lock.before)" >&2
       cp Cargo.lock "$TARGET_DIR/Cargo.lock.before"
-      git checkout -- Cargo.lock
+      restore_lock
     fi
     mkdir -p "$THREAD_TARGET_DIR"
     if [ -n "$(ls -A "$THREAD_TARGET_DIR" 2>/dev/null)" ]; then THREAD_DIR_FRESH=0; else THREAD_DIR_FRESH=1; fi
@@ -233,7 +246,7 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
     fi
     # Undo the lock rewrite this build made, so the next run starts from the
     # same graph (and a failed one does not poison the following attempt).
-    git checkout -- Cargo.lock 2>/dev/null || true
+    restore_lock
   fi
 else
   echo "warning: no '$NIGHTLY' toolchain (needs rustup, rust-src): skipping the threaded module" >&2
