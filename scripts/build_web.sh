@@ -70,6 +70,28 @@ THREAD_RUSTFLAGS="$BASE_RUSTFLAGS \
 NIGHTLY="${HORIZON_NIGHTLY:-nightly-2026-10-30}"
 NIGHTLY_HINT="rustup toolchain install $NIGHTLY -c rust-src -t wasm32-unknown-unknown"
 
+# A target directory is only valid for the compiler that filled it. `-Z
+# build-std` leaves its own `core` in $THREAD_TARGET_DIR/.../build/core/*/out,
+# and one from a different nightly sitting next to the current nightly's sysroot
+# `core` is exactly what `error[E0152]: duplicate lang item in crate `core``
+# looks like (reached by using the directory with more than one toolchain). So
+# record which compiler filled it and start clean when that changes.
+prepare_thread_dir() {
+  local stamp="$THREAD_TARGET_DIR/.toolchain" version
+  version="$(rustc +"$NIGHTLY" --version 2>/dev/null || echo unknown)"
+  if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$version" ]; then
+    return 0
+  fi
+  if [ -d "$THREAD_TARGET_DIR" ] && [ -n "$(ls -A "$THREAD_TARGET_DIR" 2>/dev/null)" ]; then
+    echo "note: clearing $THREAD_TARGET_DIR" >&2
+    echo "      (it was built with $(cat "$stamp" 2>/dev/null || echo 'an unknown toolchain'))" >&2
+    echo "      rebuilding it with $version; that takes a few minutes the first time" >&2
+    rm -rf "$THREAD_TARGET_DIR"
+  fi
+  mkdir -p "$THREAD_TARGET_DIR"
+  printf '%s' "$version" > "$stamp"
+}
+
 build_threaded() {
   local wasm="$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/horizon-client.wasm"
   local out="$TARGET_DIR/wasm-bindgen-web-threaded"
@@ -105,8 +127,9 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
     python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$NIGHTLY" || threads_failed=1
   fi
   if [ "$threads_failed" -eq 0 ]; then
+    prepare_thread_dir
     if build_threaded; then
-      echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm"
+      echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm ($NIGHTLY)"
     else
       echo "error: the threaded module failed to build; cargo's output above says why" >&2
       echo "       the flags need a nightly with rust-src; this project builds with" >&2

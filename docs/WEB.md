@@ -165,6 +165,19 @@ python3 scripts/pack_vfs.py \
 python3 scripts/serve_web.py 5173     # http://localhost:5173/
 ```
 
+If you do not know where the prepared files are — a launcher install keeps
+them in its own folder — the manifest finds them:
+
+```sh
+python3 scripts/pack_vfs.py \
+  "$(dirname "$(find ~ -name horizon-resources.json 2>/dev/null | head -1)")" \
+  /tmp/empty-cache public/horizon-vfs.bin
+```
+
+A correct pack reports thousands of files and hundreds of megabytes; a folder
+without the manifest is refused rather than packed empty. With no recorded game
+files at all, the page stops with the same message the desktop client gives.
+
 ## Known limitations
 
 - The renderer needs **WebGPU** (Chrome/Edge 113+, Safari 26, Firefox with
@@ -178,7 +191,10 @@ python3 scripts/serve_web.py 5173     # http://localhost:5173/
 - The threaded module needs a nightly toolchain with `rust-src`
   (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
   to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to
-  one; later nightlies fail inside the compiler on this crate. Without either, the page
+  one; later nightlies fail inside the compiler on this crate. The threaded
+  build's target directory records which nightly filled it and is cleared when
+  that changes, because build-std artifacts from two nightlies in one directory
+  fail with `error[E0152]: duplicate lang item in crate `core``. Without either, the page
   builds and runs the single-threaded module, and terrain streams in on the
   render thread: walking into unloaded chunks costs frames.
 - The autosave runs every 200 ticks (ten seconds) in the browser instead of
