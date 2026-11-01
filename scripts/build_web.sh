@@ -95,14 +95,15 @@ threaded_cargo() {
 # item`) the compile command says which one: print its flags from a verbose
 # re-run, which only rebuilds the units that failed, so it is quick.
 diagnose_lang_item() {
+  echo "       patches cargo skipped, if any:" >&2
+  grep -i 'was not used in the crate graph' "$LOG" | sed 's/^/         /' >&2 || true
   echo "       dlmalloc was compiled with:" >&2
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
     cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
       --profile "$PROFILE" --target wasm32-unknown-unknown \
       -p horizon-client --bin horizon-client -v 2>&1 \
     | grep -m1 -- '--crate-name dlmalloc' \
-    | tr ' ' '\n' \
-    | grep -E '^(--extern|-Z|--sysroot|-C target-feature|--cfg)' \
+    | grep -o -e '--extern [^ ]*' -e '-Z [^ ]*' -e '--sysroot [^ ]*' -e '-C target-feature=[^ ]*' \
     | sed 's/^/         /' >&2 || true
 }
 
