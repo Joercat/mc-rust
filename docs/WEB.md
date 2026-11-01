@@ -70,10 +70,13 @@ The pieces, in build order:
 
    An install that is already prepared — the launcher's folder, or one made
    with `horizon-prepare --prepare --server-jar …` — needs none of that: its
-   `resources/` already holds the binary tables, so the pack is one command:
+   resource folder (`.local/horizon-client/<version>`, the one holding
+   `horizon-resources.json`) already has the binary tables, so the pack is one
+   command:
 
    ```sh
-   python3 scripts/pack_vfs.py PATH/TO/resources PATH/TO/.horizon-cache public/horizon-vfs.bin
+   python3 scripts/pack_vfs.py PATH/TO/.local/horizon-client/26.3 \
+     PATH/TO/.horizon-cache public/horizon-vfs.bin
    ```
 
    (An empty directory works for the cache argument; it is packed as
@@ -133,15 +136,18 @@ release archive in this repository's root:
 mkdir -p ~/horizon-native && cd ~/horizon-native
 tar -xJf /path/to/mc-rust/horizon-complete-linux-x86_64.tar.xz
 cd horizon-game/data_payload-game
-# Needs Minecraft Java Edition 26.3 played once and a Java 25 runtime.
-./horizon-prepare --prepare --server-jar ~/Downloads/server.jar --root ./resources
+# Needs Minecraft Java Edition 26.3 played once, a Java 25 runtime, and that
+# version's server jar: Minecraft's own data archive, imported (never run).
+./horizon-prepare --prepare --server-jar ~/Downloads/server.jar
+# Writes .local/horizon-client/26.3 beside research-lock.json.
 ```
 
 Then pack that folder and serve:
 
 ```sh
 cd /path/to/mc-rust
-python3 scripts/pack_vfs.py ~/horizon-native/horizon-game/data_payload-game/resources \
+python3 scripts/pack_vfs.py \
+  ~/horizon-native/horizon-game/data_payload-game/.local/horizon-client/26.3 \
   ~/horizon-native/horizon-game/data_payload-game/.horizon-cache public/horizon-vfs.bin
 python3 scripts/serve_web.py 5173     # http://localhost:5173/
 ```
