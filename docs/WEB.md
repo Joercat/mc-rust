@@ -192,9 +192,10 @@ files at all, the page stops with the same message the desktop client gives.
   (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
   to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to
   one; later nightlies fail inside the compiler on this crate. The threaded
-  build's target directory records which nightly filled it and is cleared when
-  that changes, because build-std artifacts from two nightlies in one directory
-  fail with `error[E0152]: duplicate lang item in crate `core``. Without either, the page
+  build's target directory is keyed by that nightly
+  (`target/threads/<hash of rustc --version>`), because build-std artifacts from
+  two nightlies in one directory fail with `error[E0152]: duplicate lang item in
+  crate `core``, and a keyed path cannot mix them. Without either, the page
   builds and runs the single-threaded module, and terrain streams in on the
   render thread: walking into unloaded chunks costs frames.
 - The autosave runs every 200 ticks (ten seconds) in the browser instead of

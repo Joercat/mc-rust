@@ -52,7 +52,7 @@ cp "$OUT/horizon-client.js" "$OUT/horizon-client_bg.wasm" public/
 #    transform uses to give each worker its own stack and thread-locals.
 #    `--max-memory` sizes that shared memory; 2 GiB is the largest a browser
 #    reliably gives a `SharedArrayBuffer`.
-THREAD_TARGET_DIR="$TARGET_DIR/threads"
+THREADS_DIR_ROOT="$TARGET_DIR/threads"
 LOG="$TARGET_DIR/threaded-build.log"
 THREAD_RUSTFLAGS="$BASE_RUSTFLAGS \
   -C target-feature=+atomics,+bulk-memory,+mutable-globals \
@@ -71,27 +71,17 @@ THREAD_RUSTFLAGS="$BASE_RUSTFLAGS \
 NIGHTLY="${HORIZON_NIGHTLY:-nightly-2026-10-30}"
 NIGHTLY_HINT="rustup toolchain install $NIGHTLY -c rust-src -t wasm32-unknown-unknown"
 
-# A target directory is only valid for the compiler that filled it. `-Z
-# build-std` leaves its own `core` in $THREAD_TARGET_DIR/.../build/core/*/out,
-# and one from a different nightly sitting next to the current nightly's sysroot
-# `core` is exactly what `error[E0152]: duplicate lang item in crate `core``
-# looks like (reached by using the directory with more than one toolchain). So
-# record which compiler filled it and start clean when that changes.
-prepare_thread_dir() {
-  local stamp="$THREAD_TARGET_DIR/.toolchain" version
-  version="$(rustc +"$NIGHTLY" --version 2>/dev/null || echo unknown)"
-  if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$version" ]; then
-    return 0
-  fi
-  if [ -d "$THREAD_TARGET_DIR" ] && [ -n "$(ls -A "$THREAD_TARGET_DIR" 2>/dev/null)" ]; then
-    echo "note: clearing $THREAD_TARGET_DIR" >&2
-    echo "      (it was built with $(cat "$stamp" 2>/dev/null || echo 'an unknown toolchain'))" >&2
-    echo "      rebuilding it with $version; that takes a few minutes the first time" >&2
-    rm -rf "$THREAD_TARGET_DIR"
-  fi
-  mkdir -p "$THREAD_TARGET_DIR"
-  printf '%s' "$version" > "$stamp"
-}
+# One target directory per compiler. `-Z build-std` caches the `core` it builds
+# for std's own dependencies (`dlmalloc`, `cfg_if`, …) in
+# `<dir>/wasm32-unknown-unknown/fast/build/core/*/out`. One of those left by a
+# *different* compiler sits next to the current compiler's sysroot `core`, and
+# every std dependency then fails with `error[E0152]: duplicate lang item in
+# crate core`. Keying the directory by the compiler's version means such an
+# artifact cannot be reached at all, so no stamp or wipe can be forgotten.
+THREAD_VERSION="$(rustc +"$NIGHTLY" --version 2>/dev/null || echo unknown)"
+THREAD_KEY="$(printf '%s' "$THREAD_VERSION" | sha256sum | cut -c1-8)"
+THREAD_TARGET_DIR="$THREADS_DIR_ROOT/$THREAD_KEY"
+mkdir -p "$THREADS_DIR_ROOT"
 
 threaded_cargo() {
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
@@ -109,19 +99,21 @@ build_threaded() {
   # because `set -e` does not apply inside a function called from an `if`.
   rm -f "$wasm" "$out/horizon-client.js" "$out/horizon-client_bg.wasm"
   if ! threaded_cargo; then
-    # `-Z build-std` caches the rebuilt `core` for std's own dependencies in
-    # $THREAD_TARGET_DIR. One from a different compiler sits next to this
-    # compiler's sysroot `core` and every std dependency fails with
-    # `E0152 duplicate lang item in crate core`. The stamp above usually keeps
-    # that from happening; this catches the case where it did not (a directory
-    # filled before the stamp existed), because only std was built, so throwing
-    # it away costs minutes and no guesswork.
+    # `-Z build-std` caches a rebuilt `core` for std's own dependencies. Since
+    # the directory belongs to this compiler alone, an `E0152 duplicate lang
+    # item` here means the cache itself is damaged (an interrupted build, a
+    # half-written `out/`), so throwing it away and building again is the fix
+    # that does not require guesswork. Only std was built, so the retry costs
+    # minutes, not the whole build.
     if grep -q 'duplicate lang item' "$LOG"; then
-      echo "note: $THREAD_TARGET_DIR holds std built by another compiler" >&2
-      echo "      clearing it and building again ($(rustc +"$NIGHTLY" --version))" >&2
+      echo "note: the std cache in $THREAD_TARGET_DIR cannot be used" >&2
+      echo "      clearing it and building again ($THREAD_VERSION)" >&2
       rm -rf "$THREAD_TARGET_DIR"
-      prepare_thread_dir || return 1
-      threaded_cargo || return 1
+      if ! threaded_cargo; then
+        echo "error: the threaded build failed again with nothing left over from" >&2
+        echo "       an earlier run, so this is not a stale cache: $LOG" >&2
+        return 1
+      fi
     else
       echo "      the full cargo log is in $LOG" >&2
       return 1
@@ -142,7 +134,7 @@ threads_failed=0
 if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
   # Say which compiler and directory this run used: a log without it cannot be
   # told apart from one an older copy of this script made.
-  echo "build: $(rustc +"$NIGHTLY" --version) -> $THREAD_TARGET_DIR" >&2
+  echo "build_web.sh @$(git rev-parse --short HEAD 2>/dev/null || echo unknown) with $THREAD_VERSION -> $THREAD_TARGET_DIR" >&2
   # `std`'s own dependencies (`object`, `addr2line`, `compiler_builtins`,
   # `dlmalloc`, …) are in rust-src's lockfile, not the project's, so they are
   # not vendored by the scripts that build this directory. The same script
@@ -153,7 +145,7 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
     python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$NIGHTLY" || threads_failed=1
   fi
   if [ "$threads_failed" -eq 0 ]; then
-    prepare_thread_dir
+    mkdir -p "$THREAD_TARGET_DIR"
     if build_threaded; then
       echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm ($NIGHTLY)"
     else
