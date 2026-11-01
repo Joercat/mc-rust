@@ -198,9 +198,11 @@ files at all, the page stops with the same message the desktop client gives.
   crate `core``, and a keyed path cannot mix them. Without either, the page
   builds and runs the single-threaded module, and terrain streams in on the
   render thread: walking into unloaded chunks costs frames.
-- The autosave runs every 200 ticks (ten seconds) in the browser instead of
+- The autosave runs every 600 ticks (thirty seconds) in the browser instead of
   vanilla's 6000, because a page can be closed or navigated away from between
-  saves. Hiding the page also asks the game for an immediate save, and the page
+  saves. Saves encode their modified chunks in the frame, so the interval is
+  the trade: shorter loses less work when a page closes, longer hitches less
+  often. Hiding the page also asks the game for an immediate save, and the page
   mirrors its files to IndexedDB every three seconds and when it unloads, so a
   reload lands on the position the player left.
 
