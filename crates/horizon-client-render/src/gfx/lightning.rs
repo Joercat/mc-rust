@@ -211,9 +211,13 @@ impl Renderer {
         pass.set_vertex_buffer(1, instances.slice(..));
         // Follow simulation order, including repeated seeds; HashMap order must
         // never change additive accumulation or the order before dragon rays.
+        let stride = std::mem::size_of::<[f32; 3]>() as u64;
         for (i, bolt) in input.bolts.iter().enumerate() {
             pass.set_vertex_buffer(0, self.cache.meshes[&bolt.seed].mesh.slice(..));
-            pass.draw_indexed(0..QUADS * 6, 0, i as u32..i as u32 + 1);
+            // The bolt's offsets as a slice rather than a first instance, which
+            // WebGL2 needs an extension for.
+            pass.set_vertex_buffer(1, instances.slice(i as u64 * stride..));
+            pass.draw_indexed(0..QUADS * 6, 0, 0..1);
         }
     }
 }

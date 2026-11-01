@@ -379,7 +379,9 @@ impl PackEntities {
             (self.slots, self.group) =
                 Self::slot_buffer(device, layout, need_slots.next_power_of_two(), self.stride);
         }
-        let quads = self.draws.iter().map(|d| d.quads).max().unwrap_or(0);
+        // Every quad gets its index: draws address their vertices by index range
+        // rather than a base vertex, which WebGL2 needs an extension for.
+        let quads = self.scratch.len() as u32 / 4;
         if quads > self.quads {
             self.quads = quads.next_power_of_two();
             self.indices = quad_indices(device, self.quads);

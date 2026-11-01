@@ -3222,8 +3222,16 @@ impl Renderer {
                 let offset = (i - base as usize) as u64 * 20;
                 pass.multi_draw_indexed_indirect(indirect, offset, run as u32);
             } else {
+                // No base vertex and no first instance: WebGL2 needs an
+                // extension for either, and an extension some browsers lack is
+                // not worth a renderer. Bind the section's vertices and its
+                // origin as slices instead; the indices stay section-local.
+                let stride = std::mem::size_of::<TerrainVertex>() as u64;
                 for d in &draws[i..i + run] {
-                    pass.draw_indexed(d[2]..d[2] + d[0], d[3] as i32, d[4]..d[4] + 1);
+                    let vertices = u64::from(d[3]) * stride;
+                    pass.set_vertex_buffer(0, self.arena.buffer(page).slice(vertices..));
+                    pass.set_vertex_buffer(1, self.instances.slice(u64::from(d[4]) * 16..));
+                    pass.draw_indexed(d[2]..d[2] + d[0], 0, 0..1);
                 }
             }
             i += run;
@@ -5023,7 +5031,7 @@ impl Renderer {
                 pass.set_pipeline(&self.text_polygon_offset_pipeline);
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
-                pass.draw_indexed(0..text_quads * 6, (entity_quads * 4) as i32, 0..1);
+                pass.draw_indexed(entity_quads * 6..(entity_quads + text_quads) * 6, 0, 0..1);
                 pass.set_bind_group(0, &self.group, &[]);
             }
             if translucent_item_quads > 0 {
@@ -5031,8 +5039,8 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..translucent_item_quads * 6,
-                    ((world_quads - translucent_item_quads) * 4) as i32,
+                    (world_quads - translucent_item_quads) * 6..world_quads * 6,
+                    0,
                     0..1,
                 );
                 pass.set_bind_group(0, &self.group, &[]);
@@ -5046,8 +5054,8 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..crumbling_quads * 6,
-                    ((entity_quads + text_quads) * 4) as i32,
+                    (entity_quads + text_quads) * 6..(entity_quads + text_quads + crumbling_quads) * 6,
+                    0,
                     0..1,
                 );
                 pass.set_bind_group(0, &self.group, &[]);
@@ -5057,12 +5065,12 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..shadow_quads * 6,
-                    ((world_quads
+                    (world_quads
                         - translucent_item_quads
                         - translucent_particle_quads
                         - shadow_quads)
-                        * 4) as i32,
+                        * 6..(world_quads - translucent_item_quads - translucent_particle_quads) * 6,
+                    0,
                     0..1,
                 );
                 pass.set_bind_group(0, &self.group, &[]);
@@ -5074,9 +5082,14 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..water_mask_quads * 6,
-                    ((entity_quads + text_quads + crumbling_quads + translucent_crumbling_quads)
-                        * 4) as i32,
+                    (entity_quads + text_quads + crumbling_quads + translucent_crumbling_quads)
+                        * 6..(entity_quads
+                        + text_quads
+                        + crumbling_quads
+                        + translucent_crumbling_quads
+                        + water_mask_quads)
+                        * 6,
+                    0,
                     0..1,
                 );
                 pass.set_bind_group(0, &self.group, &[]);
@@ -5092,13 +5105,19 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..swirl_quads * 6,
-                    ((entity_quads
+                    (entity_quads
                         + text_quads
                         + crumbling_quads
                         + translucent_crumbling_quads
                         + water_mask_quads)
-                        * 4) as i32,
+                        * 6..(entity_quads
+                        + text_quads
+                        + crumbling_quads
+                        + translucent_crumbling_quads
+                        + water_mask_quads
+                        + swirl_quads)
+                        * 6,
+                    0,
                     0..1,
                 );
                 pass.set_bind_group(0, &self.group, &[]);
@@ -5107,7 +5126,11 @@ impl Renderer {
                 pass.set_pipeline(&self.additive_pipeline);
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
-                pass.draw_indexed(0..additive_quads * 6, (world_quads * 4) as i32, 0..1);
+                pass.draw_indexed(
+                    world_quads * 6..(world_quads + additive_quads) * 6,
+                    0,
+                    0..1,
+                );
                 pass.set_bind_group(0, &self.group, &[]);
             }
             if outline_edges > 0 && !frame.outline_after_terrain {
@@ -5157,9 +5180,9 @@ impl Renderer {
                 pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..translucent_particle_quads * 6,
-                    ((world_quads - translucent_item_quads - translucent_particle_quads) * 4)
-                        as i32,
+                    (world_quads - translucent_item_quads - translucent_particle_quads) * 6
+                        ..(world_quads - translucent_item_quads) * 6,
+                    0,
                     0..1,
                 );
                 pass.set_bind_group(0, &self.group, &[]);
@@ -5187,8 +5210,10 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..translucent_crumbling_quads * 6,
-                    ((entity_quads + text_quads + crumbling_quads) * 4) as i32,
+                    (entity_quads + text_quads + crumbling_quads) * 6
+                        ..(entity_quads + text_quads + crumbling_quads + translucent_crumbling_quads)
+                            * 6,
+                    0,
                     0..1,
                 );
             }
@@ -5205,8 +5230,9 @@ impl Renderer {
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
                 pass.draw_indexed(
-                    0..see_through_quads * 6,
-                    ((world_quads + additive_quads + hand_quads) * 4) as i32,
+                    (world_quads + additive_quads + hand_quads) * 6
+                        ..(world_quads + additive_quads + hand_quads + see_through_quads) * 6,
+                    0,
                     0..1,
                 );
             }
@@ -5350,8 +5376,8 @@ impl Renderer {
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
             pass.draw_indexed(
-                0..hand_quads * 6,
-                ((world_quads + additive_quads) * 4) as i32,
+                (world_quads + additive_quads) * 6..(world_quads + additive_quads + hand_quads) * 6,
+                0,
                 0..1,
             );
             drop(pass);
@@ -5397,7 +5423,8 @@ impl Renderer {
                     crate::screen_effects::Blend::Vignette => 4,
                 };
                 pass.set_pipeline(&self.screen_pipelines[blend + (quad.sampling & 3) as usize]);
-                pass.draw_indexed(0..6, (i * 4) as i32, 0..1);
+                let first = i as u32 * 6;
+                pass.draw_indexed(first..first + 6, 0, 0..1);
             }
         }
         // GameRenderer.render3dHud: the debug crosshair after the hand and
