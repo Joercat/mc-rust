@@ -53,6 +53,7 @@ cp "$OUT/horizon-client.js" "$OUT/horizon-client_bg.wasm" public/
 #    `--max-memory` sizes that shared memory; 2 GiB is the largest a browser
 #    reliably gives a `SharedArrayBuffer`.
 THREAD_TARGET_DIR="$TARGET_DIR/threads"
+LOG="$TARGET_DIR/threaded-build.log"
 THREAD_RUSTFLAGS="$BASE_RUSTFLAGS \
   -C target-feature=+atomics,+bulk-memory,+mutable-globals \
   -C link-arg=--import-memory \
@@ -92,6 +93,13 @@ prepare_thread_dir() {
   printf '%s' "$version" > "$stamp"
 }
 
+threaded_cargo() {
+  RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
+    cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
+      --profile "$PROFILE" --target wasm32-unknown-unknown \
+      -p horizon-client --bin horizon-client 2>&1 | tee "$LOG"
+}
+
 build_threaded() {
   local wasm="$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/horizon-client.wasm"
   local out="$TARGET_DIR/wasm-bindgen-web-threaded"
@@ -100,10 +108,25 @@ build_threaded() {
   # success that did not happen. Each step is checked explicitly as well,
   # because `set -e` does not apply inside a function called from an `if`.
   rm -f "$wasm" "$out/horizon-client.js" "$out/horizon-client_bg.wasm"
-  RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
-    cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
-      --profile "$PROFILE" --target wasm32-unknown-unknown \
-      -p horizon-client --bin horizon-client || return 1
+  if ! threaded_cargo; then
+    # `-Z build-std` caches the rebuilt `core` for std's own dependencies in
+    # $THREAD_TARGET_DIR. One from a different compiler sits next to this
+    # compiler's sysroot `core` and every std dependency fails with
+    # `E0152 duplicate lang item in crate core`. The stamp above usually keeps
+    # that from happening; this catches the case where it did not (a directory
+    # filled before the stamp existed), because only std was built, so throwing
+    # it away costs minutes and no guesswork.
+    if grep -q 'duplicate lang item' "$LOG"; then
+      echo "note: $THREAD_TARGET_DIR holds std built by another compiler" >&2
+      echo "      clearing it and building again ($(rustc +"$NIGHTLY" --version))" >&2
+      rm -rf "$THREAD_TARGET_DIR"
+      prepare_thread_dir || return 1
+      threaded_cargo || return 1
+    else
+      echo "      the full cargo log is in $LOG" >&2
+      return 1
+    fi
+  fi
   if [ ! -f "$wasm" ]; then
     echo "error: cargo reported success but $wasm is missing" >&2
     return 1
@@ -117,6 +140,9 @@ build_threaded() {
 
 threads_failed=0
 if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
+  # Say which compiler and directory this run used: a log without it cannot be
+  # told apart from one an older copy of this script made.
+  echo "build: $(rustc +"$NIGHTLY" --version) -> $THREAD_TARGET_DIR" >&2
   # `std`'s own dependencies (`object`, `addr2line`, `compiler_builtins`,
   # `dlmalloc`, …) are in rust-src's lockfile, not the project's, so they are
   # not vendored by the scripts that build this directory. The same script
