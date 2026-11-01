@@ -1,0 +1,32 @@
+# Render Blueprint for the web client (docs/WEB.md).
+#
+# This branch publishes `public/` as-is: the page, both engines and their glue
+# are committed here. The resource pack is hundreds of megabytes, so it is not:
+# the build downloads it from the URL in HORIZON_VFS_URL, which is set in the
+# Render Dashboard (a release asset of this repository works).
+#
+# The two isolation headers are what make the page a cross-origin isolated
+# secure context, which is what the threaded engine's shared memory needs.
+# Without them the page still runs, single-threaded, on Render's HTTPS.
+services:
+  - type: web
+    name: horizon-web
+    runtime: static
+    branch: threaded-wasm
+    buildCommand: bash scripts/render_build.sh
+    staticPublishPath: ./public
+    envVars:
+      - key: HORIZON_VFS_URL
+        sync: false
+    headers:
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Embedder-Policy
+        value: require-corp
+      # The pack is fetched on every load and changes when it is repacked, so a
+      # stored copy must be revalidated rather than outliving its build.
+      - path: /horizon-vfs.bin
+        name: Cache-Control
+        value: no-cache
