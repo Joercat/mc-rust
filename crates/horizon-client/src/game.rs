@@ -6127,6 +6127,13 @@ impl Game<'_> {
     fn capture_loaded_world(&mut self) {
         // Loading may finish after focus was lost or another screen opened.
         if self.title.is_none() && self.screen == Screen::Playing {
+            // A browser grants pointer lock only while a user gesture is live,
+            // and a world that finishes loading seconds after the click that
+            // started it has none: the request is rejected, winit's web backend
+            // drops the promise, and the rejection lands on the page. Leave the
+            // pointer free there; the first click in the world takes it, and
+            // that click is the gesture (`Screen::Playing` mouse press).
+            #[cfg(not(target_arch = "wasm32"))]
             self.capture(true);
         }
     }
