@@ -159,11 +159,13 @@ build_threaded() {
         echo "       on this machine. the block above names the one dlmalloc got." >&2
         return 1
       fi
-      # If std itself was built during this run, clearing cannot change the
-      # outcome, and a retry would spend minutes rebuilding it to fail the same
-      # way. Same-machine evidence beats the hope that the directory is bad.
-      if grep -q 'Compiling core v' "$LOG"; then
-        echo "       (std was built from scratch in this run, so clearing it cannot" >&2
+      # If this directory already holds a rebuilt core, clearing cannot change
+      # the outcome, and a retry spends minutes rebuilding std to fail the same
+      # way. The compiler-keyed path already rules out the cross-compiler
+      # staleness this retry was written for, so report and stop.
+      if ls "$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE"/build/core/*/out/libcore-*.rmeta >/dev/null 2>&1 \
+        || grep -q 'Compiling core v' "$LOG"; then
+        echo "       (std is complete in this directory, so clearing it cannot" >&2
         echo "       change anything; not retrying)" >&2
         return 1
       fi
