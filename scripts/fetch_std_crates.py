@@ -24,7 +24,8 @@ alone, so a manifest `assemble_vendor.py` patched is not overwritten.
 Usage: scripts/fetch_std_crates.py [VENDOR_DIR] [TOOLCHAIN]
 
 VENDOR_DIR defaults to /tmp/horizon-vendor (what `.cargo/config.toml` points
-at) and TOOLCHAIN to `nightly`. Crates already vendored correctly are left
+at) and TOOLCHAIN to `nightly-2026-10-30`, the nightly the web build pins (see
+scripts/build_web.sh). Crates already vendored correctly are left
 alone, so the script is cheap to re-run and safe to run offline: it skips
 everything it already has and only reports what it could not fetch.
 """
@@ -41,7 +42,7 @@ import urllib.request
 from pathlib import Path
 
 VENDOR = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/horizon-vendor")
-TOOLCHAIN = sys.argv[2] if len(sys.argv) > 2 else "nightly"
+TOOLCHAIN = sys.argv[2] if len(sys.argv) > 2 else "nightly-2026-10-30"
 DOWNLOAD = "https://crates.io/api/v1/crates/{name}/{version}/download"
 
 

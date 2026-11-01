@@ -119,13 +119,16 @@ Everything below assumes no toolchain at all. On Windows do it inside WSL2
 # 1. System packages. macOS: brew install python3 git xz.
 sudo apt update && sudo apt install -y build-essential curl git python3 xz-utils
 
-# 2. Rust: stable builds the fallback module, nightly + rust-src the threaded one.
+# 2. Rust: stable builds the fallback module, a pinned nightly + rust-src the
+#    threaded one. The nightly is pinned to the one this project builds with:
+#    2026-10-31 breaks in the compiler itself (`error[E0391]: cycle detected
+#    when computing when `ItemStack` needs async drop`), and `build_web.sh`
+#    defaults to the pin. `HORIZON_NIGHTLY` overrides it.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 . "$HOME/.cargo/env"
-rustup toolchain install stable nightly
+rustup toolchain install stable
 rustup target add wasm32-unknown-unknown
-rustup target add wasm32-unknown-unknown --toolchain nightly
-rustup component add rust-src --toolchain nightly
+rustup toolchain install nightly-2026-10-30 -c rust-src -t wasm32-unknown-unknown
 
 # 3. Vendor every crate (~800 MB in /tmp/horizon-vendor, the directory
 #    .cargo/config.toml points at; change both if you want another one).
@@ -173,7 +176,9 @@ python3 scripts/serve_web.py 5173     # http://localhost:5173/
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
 - The threaded module needs a nightly toolchain with `rust-src`
-  (`-Z build-std`) and a cross-origin isolated page. Without either, the page
+  (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
+  to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to
+  one; later nightlies fail inside the compiler on this crate. Without either, the page
   builds and runs the single-threaded module, and terrain streams in on the
   render thread: walking into unloaded chunks costs frames.
 - The autosave runs every 200 ticks (ten seconds) in the browser instead of

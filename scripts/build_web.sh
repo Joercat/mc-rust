@@ -62,7 +62,13 @@ THREAD_RUSTFLAGS="$BASE_RUSTFLAGS \
   -C link-arg=--export=__tls_size \
   -C link-arg=--export=__tls_align \
   -C link-arg=--export=__tls_base"
-NIGHTLY="${HORIZON_NIGHTLY:-nightly}"
+# Pinned. Newer nightlies do not compile this crate at all: 2026-10-31
+# (f9ceb4a4d) stops with `error[E0391]: cycle detected when computing when
+# `ItemStack` needs async drop`, and its `std` build has also failed with
+# `duplicate lang item in crate `core``. 2026-10-30 (92b5b8c87) builds both
+# modules. Override with HORIZON_NIGHTLY to try another nightly.
+NIGHTLY="${HORIZON_NIGHTLY:-nightly-2026-10-30}"
+NIGHTLY_HINT="rustup toolchain install $NIGHTLY -c rust-src -t wasm32-unknown-unknown"
 
 build_threaded() {
   local wasm="$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/horizon-client.wasm"
@@ -103,11 +109,14 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
       echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm"
     else
       echo "error: the threaded module failed to build; cargo's output above says why" >&2
+      echo "       the flags need a nightly with rust-src; this project builds with" >&2
+      echo "       $NIGHTLY, which this script uses by default ($NIGHTLY_HINT)" >&2
       threads_failed=1
     fi
   fi
 else
   echo "warning: no '$NIGHTLY' toolchain (needs rustup, rust-src): skipping the threaded module" >&2
+  echo "         install it with: $NIGHTLY_HINT" >&2
 fi
 
 echo "published public/horizon-client.js and public/horizon-client_bg.wasm"
