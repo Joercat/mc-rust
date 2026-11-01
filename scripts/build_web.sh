@@ -207,6 +207,34 @@ else
   echo "         install it with: $NIGHTLY_HINT" >&2
 fi
 
+# One more compiler is worth a try before giving up. The failure above is in how
+# this machine assembles the std graph for the pinned nightly (same unit hashes,
+# same flags, same sysroot as a build that works elsewhere), and another nightly
+# builds its own std from its own rust-src into its own directory. Only when the
+# pinned one actually failed with `E0152`, only when the user did not pick a
+# nightly themselves, and only when the other one is installed.
+if [ "$threads_failed" -ne 0 ] && [ -z "${HORIZON_NIGHTLY:-}" ] \
+  && grep -q 'duplicate lang item' "$LOG" 2>/dev/null; then
+  for ALT in nightly-2026-10-29 nightly-2026-10-31; do
+    [ "$ALT" = "$NIGHTLY" ] && continue
+    cargo +"$ALT" --version >/dev/null 2>&1 || continue
+    echo "note: $NIGHTLY cannot build std here; trying $ALT instead" >&2
+    NIGHTLY="$ALT"
+    NIGHTLY_HINT="rustup toolchain install $ALT -c rust-src -t wasm32-unknown-unknown"
+    THREAD_VERSION="$(rustc +"$ALT" --version 2>/dev/null || echo unknown)"
+    THREAD_KEY="$(printf '%s' "$THREAD_VERSION" | sha256sum | cut -c1-8)"
+    THREAD_TARGET_DIR="$THREADS_DIR_ROOT/$THREAD_KEY"
+    python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$ALT" || continue
+    mkdir -p "$THREAD_TARGET_DIR"
+    THREAD_DIR_FRESH=1
+    if build_threaded; then
+      echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm ($ALT)"
+      threads_failed=0
+      break
+    fi
+  done
+fi
+
 echo "published public/horizon-client.js and public/horizon-client_bg.wasm"
 echo "serve with: python3 scripts/serve_web.py 5173"
 
