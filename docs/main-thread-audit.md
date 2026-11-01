@@ -61,6 +61,42 @@ taken without the shim.
 - `Condvar::wait` is taken only inside a `may_block()` branch (the save
   `flush`, the ring search), and `Streaming::wait`/the streamer mailbox poll.
 
+## Server round trips: a frame budget, not a freeze
+
+`Integrated::call` (`executeBlocking`) is how the window asks the server thread
+for something — a world option, a LAN status, the far-terrain source. It used to
+spin on the page's main thread until the answer came, with a 10 s deadline:
+non-parking, but a multi-second stall whenever the server thread was busy.
+
+Now the wait is bounded and the work is resumable:
+
+- `Integrated::request(f)` issues the call and hands back a
+  `frame_call::Pending<T>`; `Pending::poll` takes the answer whenever it is
+  ready and never waits. Callers that do not need the value (applying world
+  options, LAN settings) use this and return immediately.
+- `Integrated::call` on the page's main thread waits at most
+  `FRAME_CALL_BUDGET` (2 ms) — a dropped frame's worth of work — and returns
+  `None` past that. On a worker thread it waits as before.
+- `lod_source`, which needs the answer to build the far-terrain mesher, keeps
+  asking: a call that ran out of budget is retried every few frames rather than
+  holding one, so the mesher still appears, just a few frames later.
+- Repeated requests keep their own channel and are never reordered or dropped:
+  the answer stays in the `Pending` until it is taken.
+
+The bound is measured, not asserted. `scripts/frame_call_bound.sh` compiles the
+shipped `game/frame_call.rs` against a deliberately slow (150 ms) server thread
+and drives 120 frames plus the old spin-until-answer path:
+
+```
+worst frame block, deferred: 17.182µs  (budget: a few ms)
+worst call block, old spin-until-answer: 150.152898ms
+answered 80, budget-exceeded 40, lost 0; server latency 150ms
+```
+
+That is the deferral, not the game: it proves the frame never waits longer than
+a few microseconds for a 150 ms round trip, and that a request whose budget ran
+out is still answered. It does not measure opening a chest in a browser.
+
 ## What the labels rest on
 
 `frame-nonparking` sites are checked by the script for the shim, a
@@ -74,7 +110,9 @@ trapping; that is an observation about the product, not a proof from the source.
 ## Not observed
 
 There is no browser here. No autosave was run, no chest was opened, and the live
-Render service was not checked. What is proven is the list above, that the
+Render service was not checked, so end-to-end chest-open latency on the page is
+unmeasured: what is proven is that no page-reachable path waits more than 2 ms
+on the server thread, and that the value arrives on a later frame. What is proven is the list above, that the
 module compiles and links, that it instantiates with shared memory, and that the
 published bytes are the committed bytes. Whether the page now survives a third
 autosave is for the browser to say.

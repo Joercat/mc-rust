@@ -1060,7 +1060,8 @@ impl Game<'_> {
             // The server applies them; the window tells what came of
             // Open to LAN (ShareToLanScreen's messages).
             let (b, w) = (*before, *wanted);
-            server.call(move |g| g.apply_world_options(&b, &w));
+            // Fire and forget: the window must not wait on the server thread.
+            let _ = server.request(move |g| g.apply_world_options(&b, &w));
             if w.lan != b.lan || (w.lan && w.port != b.port) {
                 match (w.lan, self.lan_port()) {
                     (true, Some(port)) => self.system_message(Text::translate(

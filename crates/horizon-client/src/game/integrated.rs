@@ -54,6 +54,12 @@ struct Flags {
 /// Work the window hands its server thread (`MinecraftServer.execute`).
 type Task = Box<dyn FnOnce(&mut Game<'_>) + Send>;
 
+/// The longest the page's main thread waits for a server answer. Past this the
+/// caller keeps the request's [`Pending`](super::frame_call::Pending) for a
+/// later frame rather than holding the frame: a few milliseconds is a dropped
+/// frame's worth of work, not a freeze.
+pub(super) const FRAME_CALL_BUDGET: Duration = Duration::from_millis(2);
+
 /// The window's handle on its server thread.
 pub(super) struct Integrated {
     flags: Arc<Flags>,
@@ -89,35 +95,58 @@ impl Integrated {
     pub fn published(&self) -> Option<u16> {
         Some(self.flags.published.load(Ordering::Relaxed)).filter(|&p| p != 0)
     }
-    /// `executeBlocking`: run `f` on the server thread between two ticks and
-    /// wait for its answer; `None` once the server has stopped.
-    pub fn call<T: Send + 'static>(
+    /// Issue `f` for the server thread and take its answer on a later frame.
+    /// The page's main thread keeps drawing in between; `Pending::poll` never
+    /// waits, and the answer is kept until it is taken.
+    pub fn request<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Game<'_>) -> T + Send + 'static,
-    ) -> Option<T> {
-        let (tx, rx) = sync_channel(1);
+    ) -> Option<super::frame_call::Pending<T>> {
+        let (tx, pending) = super::frame_call::request();
         self.tasks
             .send(Box::new(move |g| {
                 let _ = tx.send(f(g));
             }))
             .ok()?;
-        if !horizon_core::sync::may_block() {
-            // A page's main thread cannot park: poll while the server thread runs.
+        Some(pending)
+    }
+    /// `executeBlocking`: run `f` on the server thread between two ticks and
+    /// wait for its answer; `None` once the server has stopped.
+    ///
+    /// A worker may wait for as long as it takes. The page's main thread may
+    /// not: it waits at most [`FRAME_CALL_BUDGET`], and a caller that needs a
+    /// slower answer asks with [`request`](Self::request) instead so the wait
+    /// is spread over frames.
+    pub fn call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Game<'_>) -> T + Send + 'static,
+    ) -> Option<T> {
+        let mut pending = self.request(f)?;
+        if horizon_core::sync::may_block() {
             let deadline = horizon_core::time::Instant::now() + Duration::from_secs(10);
             loop {
-                match rx.try_recv() {
-                    Ok(value) => return Some(value),
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        if horizon_core::time::Instant::now() > deadline {
-                            return None;
-                        }
-                        std::hint::spin_loop();
-                    }
+                if let Some(value) = pending.poll() {
+                    return Some(value);
                 }
+                if pending.settled() || horizon_core::time::Instant::now() > deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_micros(200));
             }
         }
-        rx.recv_timeout(Duration::from_secs(10)).ok()
+        let deadline = horizon_core::time::Instant::now() + FRAME_CALL_BUDGET;
+        loop {
+            if let Some(value) = pending.poll() {
+                return Some(value);
+            }
+            if pending.settled() {
+                return None;
+            }
+            if horizon_core::time::Instant::now() > deadline {
+                return None;
+            }
+            std::hint::spin_loop();
+        }
     }
     /// `IntegratedServer.halt(true)`: returns once the world is saved and let go.
     pub fn stop(mut self) -> Result<()> {

@@ -289,6 +289,13 @@ true, and where a worker's answer is needed on the frame (`Integrated::call`,
 the occlusion worker) the frame polls a channel with a deadline instead. The
 per-site list is [the main-thread audit](main-thread-audit.md).
 
+A server round trip is bounded the same way. `Integrated::call` used to spin on
+the page's main thread until the server thread answered; it now waits at most
+2 ms there and hands the answer back on a later frame through
+`game/frame_call.rs` (`request`, then `Pending::poll`). `scripts/frame_call_bound.sh`
+measures that: 17 µs worst frame block against a 150 ms round trip, with the
+request still answered and nothing lost or reordered.
+
 Nothing on the frame's path waits on a lock a worker can hold. The log's
 recent-line buffer (`horizon-client-render/src/logging.rs`), the region writer's
 pending and outstanding bookkeeping with its `flush` (`save.rs`), the region

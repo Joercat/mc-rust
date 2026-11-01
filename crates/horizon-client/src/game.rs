@@ -35,6 +35,7 @@ mod code_of_conduct;
 mod combat;
 mod command_blocks;
 mod command_harness;
+mod frame_call;
 mod commands;
 mod composter;
 mod consume;
@@ -1475,6 +1476,8 @@ struct Game<'a> {
     streaming: Streaming,
     lod: Option<horizon_client::lod::Lod>,
     lod_source_attempted: bool,
+    /// Frames spent asking: a slow answer is retried every few frames.
+    lod_source_tries: u8,
     lod_observe: horizon_client::fast_hash::FxHashSet<(i32, i32)>,
     /// Beacon beam sections kept after their chunk unloads, so far terrain
     /// LOD still draws their beams (`beacon_geometry` refreshes them).
@@ -12990,10 +12993,19 @@ impl Game<'_> {
             return;
         }
         self.lod_source_attempted = true;
+        self.lod_source_tries = self.lod_source_tries.wrapping_add(1);
         let source = match &self.integrated {
             Some(server) => server.call(|game| game.streaming.lod_source()),
             None => Some(self.streaming.lod_source()),
         };
+        if source.is_none() {
+            // The server has not answered inside the frame's budget: ask again
+            // a few frames later instead of holding this one.
+            if self.lod_source_tries % 8 == 0 {
+                self.lod_source_attempted = false;
+            }
+            return;
+        }
         if let Some(source) = source {
             self.lod = Some(horizon_client::lod::Lod::new(
                 source,
@@ -14416,6 +14428,7 @@ impl<'a> Game<'a> {
             streaming,
             lod: None,
             lod_source_attempted: false,
+            lod_source_tries: 0,
             far_beacons: HashMap::new(),
             lod_observe: Default::default(),
             lod_covered_at: None,

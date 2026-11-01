@@ -1371,7 +1371,8 @@ impl Game<'_> {
     /// New command access and game mode forcing settings of the open world.
     pub(super) fn lan_apply_settings(&mut self, guest_commands: bool, force: bool) {
         if let Some(server) = &self.integrated {
-            server.call(move |g| g.lan_apply_settings(guest_commands, force));
+            // Fire and forget: the window must not wait on the server thread.
+            let _ = server.request(move |g| g.lan_apply_settings(guest_commands, force));
             return;
         }
         // An integrated server gives guests commands only where the world
