@@ -42,7 +42,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "3fb057d";
+const BUILD = "2026-11-01.2";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -332,6 +332,16 @@ window.addEventListener("error", (event) => {
   console.error("[horizon] uncaught:", event.error && event.error.stack ? event.error.stack : event.message);
   fail(event.error || event.message);
 });
-window.addEventListener("unhandledrejection", (event) => fail(event.reason));
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  // A policy answer, not a crash: Chrome rejects `requestPointerLock` when no
+  // user gesture is live, and winit's web backend drops that promise. The game
+  // takes the pointer on the next click, so say so and keep running.
+  if (reason && reason.name === "SecurityError" && /pointer lock/i.test(reason.message)) {
+    say(`pointer lock refused: ${reason.message}`);
+    return;
+  }
+  fail(reason);
+});
 
 boot().catch(fail);

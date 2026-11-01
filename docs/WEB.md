@@ -187,6 +187,9 @@ files at all, the page stops with the same message the desktop client gives.
   `WEBGL_draw_instanced_base_vertex_base_instance`: sections bind their arena
   and origin slices instead of using a base vertex or first instance, and the
   quad passes draw index ranges.
+- Pointer lock is granted only from a live user gesture, and world generation
+  outlasts one. A world therefore opens with the cursor free, and the first
+  click inside it takes the pointer; walking away with Escape releases it again.
 - Software WebGPU (SwiftShader) renders a frame in ~300 ms; a real GPU adapter
   is far faster. The FPS readout reflects that.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
