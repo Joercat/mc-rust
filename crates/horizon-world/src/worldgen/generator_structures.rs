@@ -86,13 +86,13 @@ impl RingWork {
                 break;
             };
             let _ = self.found[i].set(search.find(preferred(*set), biomes));
-            let mut left = self.left.lock().unwrap();
+            let mut left = horizon_core::sync::lock(&self.left);
             *left -= 1;
             if *left == 0 {
                 self.finished.notify_all();
             }
         }
-        let mut left = self.left.lock().unwrap();
+        let mut left = horizon_core::sync::lock(&self.left);
         while *left > 0 {
             if horizon_core::sync::may_block() {
                 left = self.finished.wait(left).unwrap();
@@ -100,7 +100,7 @@ impl RingWork {
                 // A page's main thread cannot park: poll the counter instead.
                 drop(left);
                 std::hint::spin_loop();
-                left = self.left.lock().unwrap();
+                left = horizon_core::sync::lock(&self.left);
             }
         }
     }
@@ -158,7 +158,7 @@ impl StartCache {
     }
     fn clear(&self) {
         for shard in &self.shards {
-            shard.write().unwrap().clear();
+            horizon_core::sync::write(&shard).clear();
         }
     }
 }
@@ -306,7 +306,7 @@ impl StructureState {
         // chunk-work lock while helping, even when this chunk has no starts.
         let rings = self.rings_for(context, chunk);
         let work = self.start_work.at((chunk.x, chunk.z));
-        let _work = work.lock().unwrap();
+        let _work = horizon_core::sync::lock(&work);
         if let Some(found) = self.starts.get((chunk.x, chunk.z)) {
             return found;
         }

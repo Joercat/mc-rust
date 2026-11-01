@@ -1098,7 +1098,7 @@ fn try_generate(
                 } else {
                     heights.iter().sum::<i32>() / 4
                 };
-                *piece.state.lock().unwrap() = Some(height);
+                *horizon_core::sync::lock(&piece.state) = Some(height);
             }
             (stub, legacy(vec![piece]))
         }

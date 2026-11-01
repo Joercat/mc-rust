@@ -226,7 +226,7 @@ impl LiveFeatures {
         serde_json::from_str(resources.features.get(name)?).ok()
     }
     pub fn configured(&self, name: &str) -> Option<Arc<FeatureDefinition>> {
-        let mut cache = self.configured.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.configured);
         cache
             .entry(name.to_owned())
             .or_insert_with(|| {
@@ -244,7 +244,7 @@ impl LiveFeatures {
             .clone()
     }
     pub fn placed(&self, name: &str) -> Option<Arc<PlacedFeatureDefinition>> {
-        let mut cache = self.placed.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.placed);
         cache
             .entry(name.to_owned())
             .or_insert_with(|| {

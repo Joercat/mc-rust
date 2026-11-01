@@ -60,7 +60,7 @@ use horizon_core::time::Instant;
         // SAFETY: RDTSC has no preconditions on x86_64.
         let tsc = || unsafe { core::arch::x86_64::_rdtsc() };
         let (wall, start) = (Instant::now(), tsc());
-        std::thread::sleep(Duration::from_millis(20));
+        horizon_core::sync::sleep(Duration::from_millis(20));
         (tsc() - start) as f64 / wall.elapsed().as_nanos() as f64
     });
     let mut cycles = 0;
@@ -262,7 +262,7 @@ mod pool {
         if POOL.load(Ordering::Relaxed) == 0 {
             return false;
         }
-        JOBS.lock().unwrap().push_back(Box::new(f));
+        horizon_core::sync::lock(&JOBS).push_back(Box::new(f));
         JOBS_READY.notify_one();
         true
     }
@@ -285,7 +285,7 @@ mod pool {
         horizon_core::sync::set_may_block(true);
         loop {
             let job = {
-                let mut jobs = JOBS.lock().unwrap();
+                let mut jobs = horizon_core::sync::lock(&JOBS);
                 loop {
                     if let Some(job) = jobs.pop_front() {
                         break job;

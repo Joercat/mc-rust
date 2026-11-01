@@ -235,7 +235,7 @@ impl SecureChat {
     pub fn keys(&self) -> &[horizon_protocol::rsa::RsaPublicKey] {
         self.keys.get_or_init(|| {
             let handle = self.fetch.lock().ok().and_then(|mut h| h.take());
-            handle.and_then(|h| h.join().ok()).unwrap_or_default()
+            handle.and_then(|h| horizon_core::sync::join(h).ok()).unwrap_or_default()
         })
     }
     /// enforceSecureProfile: enforced, and able to check keys.
@@ -277,13 +277,13 @@ impl Shared {
         {
             return Some(reason);
         }
-        if self.reserved.lock().unwrap().contains(&uuid) {
+        if horizon_core::sync::lock(&self.reserved).contains(&uuid) {
             return Some(translatable("multiplayer.disconnect.duplicate_login", &[]));
         }
         {
-            let online = self.online.lock().unwrap();
+            let online = horizon_core::sync::lock(&self.online);
             let bypass = self.config.bypasses_limit.as_ref().is_some_and(|b| b(uuid));
-            let taken = online.len() + self.reserved.lock().unwrap().len();
+            let taken = online.len() + horizon_core::sync::lock(&self.reserved).len();
             if taken >= self.max_players() && !bypass {
                 return Some(translatable("multiplayer.disconnect.server_full", &[]));
             }
@@ -295,29 +295,29 @@ impl Shared {
                 if horizon_core::time::Instant::now() > deadline {
                     return Some(translatable("multiplayer.disconnect.slow_login", &[]));
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                horizon_core::sync::sleep(Duration::from_millis(10));
             }
         }
-        self.online.lock().unwrap().push((uuid, name.to_owned()));
+        horizon_core::sync::lock(&self.online).push((uuid, name.to_owned()));
         None
     }
     fn is_online(&self, uuid: u128) -> bool {
-        self.online.lock().unwrap().iter().any(|(u, _)| *u == uuid)
+        horizon_core::sync::lock(&self.online).iter().any(|(u, _)| *u == uuid)
     }
     pub fn motd(&self) -> String {
-        self.motd.lock().unwrap().clone()
+        horizon_core::sync::lock(&self.motd).clone()
     }
     pub fn max_players(&self) -> usize {
         self.max_players.load(Ordering::Relaxed)
     }
     pub fn release(&self, uuid: u128) {
-        self.online.lock().unwrap().retain(|(u, _)| *u != uuid);
+        horizon_core::sync::lock(&self.online).retain(|(u, _)| *u != uuid);
     }
     pub fn online(&self) -> usize {
-        self.online.lock().unwrap().len() + self.reserved.lock().unwrap().len()
+        horizon_core::sync::lock(&self.online).len() + horizon_core::sync::lock(&self.reserved).len()
     }
     fn next_random(&self, bound: usize) -> usize {
-        let mut r = self.random.lock().unwrap();
+        let mut r = horizon_core::sync::lock(&self.random);
         *r = r
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
@@ -328,8 +328,8 @@ impl Shared {
     /// names, version, favicon and enforcesSecureChat when true.
     pub fn status_json(&self) -> String {
         use crate::server::json::Json;
-        let motd = self.motd.lock().unwrap().clone();
-        let online: Vec<(u128, String)> = self.online.lock().unwrap().clone();
+        let motd = horizon_core::sync::lock(&self.motd).clone();
+        let online: Vec<(u128, String)> = horizon_core::sync::lock(&self.online).clone();
         let count = self.online();
         let mut players = vec![
             (
@@ -515,7 +515,7 @@ impl Lan {
     pub fn stop_listening(&mut self) {
         self.listener_stop.store(true, Ordering::Relaxed);
         if let Some(t) = self.listener.take() {
-            let _ = t.join();
+            let _ = horizon_core::sync::join(t);
         }
         self._pinger = None;
         self.port = 0;
@@ -546,7 +546,7 @@ impl Lan {
     }
     /// Reserve a uuid for the host so a guest cannot take the name.
     pub fn reserve(&self, uuid: u128) {
-        self.shared.reserved.lock().unwrap().insert(uuid);
+        horizon_core::sync::lock(&self.shared.reserved).insert(uuid);
     }
     pub fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
@@ -569,9 +569,9 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: &AtomicBool) {
                     .spawn(move || handle(stream, addr, shared));
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(25));
+                horizon_core::sync::sleep(Duration::from_millis(25));
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => horizon_core::sync::sleep(Duration::from_millis(100)),
         }
     }
 }

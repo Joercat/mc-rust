@@ -65,7 +65,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.7";
+const BUILD = "2026-11-01.8";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);

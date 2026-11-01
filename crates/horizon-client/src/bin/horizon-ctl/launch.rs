@@ -245,7 +245,7 @@ pub fn launch(socket: &Path, args: &[String]) -> Result<Value, Value> {
                 "log": log,
             }));
         }
-        thread::sleep(Duration::from_millis(100));
+        horizon_core::sync::sleep(Duration::from_millis(100));
     }
     Err(
         json!({ "error": "control socket did not open within 300 seconds", "kind": "launch", "log": log }),

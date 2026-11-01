@@ -584,7 +584,7 @@ impl GeneratorData {
         generator: &Value,
     ) -> Arc<OnceLock<super::structure::start::Rings>> {
         let key = (seed, generator.to_string());
-        let mut cache = self.ring_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = horizon_core::sync::lock(&self.ring_cache);
         let rings = match cache.iter().position(|(k, _)| *k == key) {
             Some(i) => cache.remove(i).1,
             None => Arc::new(OnceLock::new()),
@@ -607,7 +607,7 @@ impl GeneratorData {
         source: &ResolvedBiomeSource,
     ) -> Result<Option<Arc<super::generator_decoration::Decoration>>, GeneratorError> {
         let slot = {
-            let mut cache = self.decorations.lock().unwrap_or_else(|e| e.into_inner());
+            let mut cache = horizon_core::sync::lock(&self.decorations);
             let slot = match cache.iter().position(|(k, _)| k == source_json) {
                 Some(i) => cache.remove(i).1,
                 None => Arc::new(OnceLock::new()),
@@ -1092,12 +1092,12 @@ where
         pos: ChunkPos,
         wait: bool,
     ) -> Result<Option<Arc<BiomeChunk<BiomeId>>>, GeneratorError> {
-        if let Some(chunk) = self.biome_cache.lock().unwrap().get(&(pos.x, pos.z)) {
+        if let Some(chunk) = horizon_core::sync::lock(&self.biome_cache).get(&(pos.x, pos.z)) {
             return Ok(Some(chunk.clone()));
         }
         let work = self.biome_work.at((pos.x, pos.z));
         let _work = if wait {
-            work.lock().unwrap()
+            horizon_core::sync::lock(&work)
         } else {
             match work.try_lock() {
                 Ok(guard) => guard,
@@ -1105,7 +1105,7 @@ where
                 Err(std::sync::TryLockError::Poisoned(error)) => panic!("{error}"),
             }
         };
-        if let Some(chunk) = self.biome_cache.lock().unwrap().get(&(pos.x, pos.z)) {
+        if let Some(chunk) = horizon_core::sync::lock(&self.biome_cache).get(&(pos.x, pos.z)) {
             return Ok(Some(chunk.clone()));
         }
         let (min, height) = (self.settings.level_min_y, self.settings.level_height);
@@ -1146,7 +1146,7 @@ where
             })
             .map_err(stage("biomes"))?;
         let chunk = Arc::new(chunk);
-        let mut cache = self.biome_cache.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.biome_cache);
         if cache.len() >= CACHE_LIMIT {
             cache.clear();
         }
@@ -1161,7 +1161,7 @@ where
         if worker.carver_biomes.len() >= 4096 {
             worker.carver_biomes.clear();
         }
-        if let Some(id) = self.carver_cache.lock().unwrap().get(&key) {
+        if let Some(id) = horizon_core::sync::lock(&self.carver_cache).get(&key) {
             worker.carver_biomes.insert(key, *id);
             return Ok(*id);
         }
@@ -1178,7 +1178,7 @@ where
             .sample(&mut worker.carver_context, quart)
             .map_err(|e| e.to_string())?;
         let id = self.data.biome_id(name).ok_or_else(|| name.to_owned())?;
-        let mut cache = self.carver_cache.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.carver_cache);
         if cache.len() >= CACHE_LIMIT * 4 {
             cache.clear();
         }
@@ -3590,7 +3590,7 @@ mod tests {
             .collect();
         let before: Vec<_> = chunks.iter().map(|&c| summary(&mut worker, c)).collect();
         assert!(before.iter().any(|s| !s.is_empty()), "no starts to compare");
-        let searched = || data.ring_cache.lock().unwrap()[0].1.get().is_some();
+        let searched = || horizon_core::sync::lock(&data.ring_cache)[0].1.get().is_some();
         assert!(!searched());
         let rings = worker
             .ring_positions("minecraft:strongholds")
@@ -3612,7 +3612,7 @@ mod tests {
         let first = OverworldGenerator::new(data.clone(), 1234).expect("generator");
         let again = OverworldGenerator::new(data.clone(), 1234).expect("generator");
         {
-            let cache = data.ring_cache.lock().unwrap();
+            let cache = horizon_core::sync::lock(&data.ring_cache);
             assert_eq!(cache.len(), 1);
             // The cache's handle and the two generators'.
             assert_eq!(Arc::strong_count(&cache[0].1), 3);
@@ -3634,7 +3634,7 @@ mod tests {
         for seed in 10..10 + RING_CACHE_LIMIT as i64 {
             data.rings_for(seed, &serde_json::json!({ "settings": "a" }));
         }
-        assert_eq!(data.ring_cache.lock().unwrap().len(), RING_CACHE_LIMIT);
+        assert_eq!(horizon_core::sync::lock(&data.ring_cache).len(), RING_CACHE_LIMIT);
         assert!(!Arc::ptr_eq(
             &a,
             &data.rings_for(1, &serde_json::json!({ "settings": "a" }))
@@ -3651,7 +3651,7 @@ mod tests {
         data.prepare_decoration("minecraft:normal", "minecraft:overworld")
             .expect("decoration");
         let built = |i: usize| {
-            let cache = data.decorations.lock().unwrap();
+            let cache = horizon_core::sync::lock(&data.decorations);
             let slot = cache[i].1.get().expect("built").clone();
             slot.expect("decoration").expect("feature resources")
         };
@@ -3661,7 +3661,7 @@ mod tests {
         let first = OverworldGenerator::new(data.clone(), 1234).expect("generator");
         let other = OverworldGenerator::new(data.clone(), -7).expect("generator");
         assert_eq!(Arc::strong_count(&prepared), 4);
-        assert_eq!(data.decorations.lock().unwrap().len(), 1);
+        assert_eq!(horizon_core::sync::lock(&data.decorations).len(), 1);
         let nether = OverworldGenerator::for_dimension(
             data.clone(),
             1234,
@@ -3669,7 +3669,7 @@ mod tests {
             "minecraft:the_nether",
         )
         .expect("generator");
-        assert_eq!(data.decorations.lock().unwrap().len(), 2);
+        assert_eq!(horizon_core::sync::lock(&data.decorations).len(), 2);
         assert!(!Arc::ptr_eq(&prepared, &built(1)));
         drop((first, other, nether));
         assert_eq!(Arc::strong_count(&prepared), 2);
@@ -3696,7 +3696,7 @@ mod tests {
     fn neighbour_work_cleanup_keeps_active_keys_and_releases_idle_keys() {
         let work = ChunkWork::new();
         let first = work.at((0, 0));
-        let held = first.lock().unwrap();
+        let held = horizon_core::sync::lock(&first);
         let same = work.at((0, 0));
         assert!(Arc::ptr_eq(&first, &same));
         assert!(!Arc::ptr_eq(&first, &work.at((1, 0))));
@@ -3784,7 +3784,7 @@ mod tests {
         }
         // Force the existing whole-cache biome eviction threshold.
         {
-            let mut cache = pipeline.biome_cache.lock().unwrap();
+            let mut cache = horizon_core::sync::lock(&pipeline.biome_cache);
             cache.clear();
             for x in 0..CACHE_LIMIT as i32 {
                 cache.insert((x, 10000), biomes.clone());
@@ -3793,7 +3793,7 @@ mod tests {
         let mut worker = generator.worker();
         let rebuilt = pipeline.biome_chunk(&mut worker.state, pos).unwrap();
         assert!(!Arc::ptr_eq(biomes, &rebuilt));
-        assert_eq!(pipeline.biome_cache.lock().unwrap().len(), 1);
+        assert_eq!(horizon_core::sync::lock(&pipeline.biome_cache).len(), 1);
         for section in 0..24 {
             assert_eq!(biomes.section(section), rebuilt.section(section));
         }

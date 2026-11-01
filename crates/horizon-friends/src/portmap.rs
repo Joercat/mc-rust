@@ -749,10 +749,10 @@ mod tests {
                         out[2] = 0;
                         out[3] = 0;
                         let ext = if life == 0 {
-                            t.lock().unwrap().remove(&internal);
+                            horizon_core::sync::lock(&t).remove(&internal);
                             0
                         } else {
-                            t.lock().unwrap().insert(internal, (internal + 1000, life));
+                            horizon_core::sync::lock(&t).insert(internal, (internal + 1000, life));
                             internal + 1000
                         };
                         out[42..44].copy_from_slice(&ext.to_be_bytes());
@@ -766,10 +766,10 @@ mod tests {
                         let internal = u16::from_be_bytes([r[4], r[5]]);
                         let life = u32::from_be_bytes(r[8..12].try_into().unwrap());
                         let ext = if life == 0 {
-                            t.lock().unwrap().remove(&internal);
+                            horizon_core::sync::lock(&t).remove(&internal);
                             0
                         } else {
-                            t.lock().unwrap().insert(internal, (internal + 1000, life));
+                            horizon_core::sync::lock(&t).insert(internal, (internal + 1000, life));
                             internal + 1000
                         };
                         let mut out = vec![0, 130, 0, 0, 0, 0, 0, 1];
@@ -796,11 +796,11 @@ mod tests {
         let mut m = map(&targets, Ipv4Addr::new(192, 168, 1, 20), 25580, LEASE).unwrap();
         assert_eq!(m.method, Method::Pcp);
         assert_eq!(m.external, "198.51.100.7:26580".parse().unwrap());
-        assert_eq!(table.lock().unwrap()[&25580], (26580, 3600));
+        assert_eq!(horizon_core::sync::lock(&table)[&25580], (26580, 3600));
         assert!(!m.due());
         m.renew().unwrap();
         m.remove();
-        assert!(table.lock().unwrap().is_empty());
+        assert!(horizon_core::sync::lock(&table).is_empty());
     }
 
     #[test]
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(m.method, Method::NatPmp);
         assert_eq!(m.external, "198.51.100.7:26580".parse().unwrap());
         m.remove();
-        assert!(table.lock().unwrap().is_empty());
+        assert!(horizon_core::sync::lock(&table).is_empty());
     }
 
     /// An IGD on loopback: description, then SOAP. `permanent_only` answers
@@ -866,12 +866,12 @@ mod tests {
                     } else if ext == taken {
                         (500, "<s:Fault><detail><UPnPError><errorCode>718</errorCode></UPnPError></detail></s:Fault>".to_owned())
                     } else {
-                        t.lock().unwrap().insert(ext, (int, client, lease));
+                        horizon_core::sync::lock(&t).insert(ext, (int, client, lease));
                         (200, "<ok/>".to_owned())
                     }
                 } else if text.contains("#DeletePortMapping") {
                     let ext: u16 = tag(&text, "NewExternalPort").unwrap().parse().unwrap();
-                    t.lock().unwrap().remove(&ext);
+                    horizon_core::sync::lock(&t).remove(&ext);
                     (200, "<ok/>".to_owned())
                 } else {
                     (404, String::new())
@@ -898,12 +898,12 @@ mod tests {
         assert_eq!(m.method, Method::Upnp);
         assert_eq!(m.external, "198.51.100.8:25580".parse().unwrap());
         assert_eq!(
-            table.lock().unwrap()[&25580],
+            horizon_core::sync::lock(&table)[&25580],
             (25580, "192.168.1.20".into(), 3600)
         );
         m.renew().unwrap();
         m.remove();
-        assert!(table.lock().unwrap().is_empty());
+        assert!(horizon_core::sync::lock(&table).is_empty());
     }
 
     #[test]
@@ -916,10 +916,10 @@ mod tests {
         let m = map(&targets, Ipv4Addr::new(10, 0, 0, 2), 25580, LEASE).unwrap();
         // 725 → no lease; 718 on 25580 → another port.
         assert_ne!(m.external.port(), 25580);
-        let entry = table.lock().unwrap()[&m.external.port()].clone();
+        let entry = horizon_core::sync::lock(&table)[&m.external.port()].clone();
         assert_eq!(entry, (25580, "10.0.0.2".into(), 0));
         m.remove();
-        assert!(table.lock().unwrap().is_empty());
+        assert!(horizon_core::sync::lock(&table).is_empty());
     }
 
     #[test]

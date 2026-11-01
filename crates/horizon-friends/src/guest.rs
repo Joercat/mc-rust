@@ -273,7 +273,7 @@ impl Tunnel {
                             if horizon_core::time::Instant::now() > deadline {
                                 break None;
                             }
-                            std::thread::sleep(Duration::from_millis(10));
+                            horizon_core::sync::sleep(Duration::from_millis(10));
                         }
                         Err(_) => break None,
                     }

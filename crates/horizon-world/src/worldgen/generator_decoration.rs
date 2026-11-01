@@ -241,7 +241,7 @@ impl Decoration {
         }))
     }
     fn named_feature(&self, name: &str) -> Option<Arc<PlacedFeatureDefinition>> {
-        let mut named = self.named.lock().unwrap();
+        let mut named = horizon_core::sync::lock(&self.named);
         named
             .entry(name.to_owned())
             .or_insert_with(|| {

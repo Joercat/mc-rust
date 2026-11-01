@@ -183,7 +183,7 @@ impl LimiterClock for SystemClock {
     }
     fn park(&mut self, nanos: i64) {
         #[cfg(not(target_arch = "wasm32"))]
-        std::thread::sleep(std::time::Duration::from_nanos(nanos.max(0) as u64));
+        horizon_core::sync::sleep(std::time::Duration::from_nanos(nanos.max(0) as u64));
         #[cfg(target_arch = "wasm32")]
         let _ = nanos;
     }
@@ -206,7 +206,7 @@ impl LimiterClock for SleepingClock {
     }
     fn spin(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
-        std::thread::sleep(std::time::Duration::from_micros(50));
+        horizon_core::sync::sleep(std::time::Duration::from_micros(50));
     }
 }
 

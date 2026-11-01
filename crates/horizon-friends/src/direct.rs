@@ -219,7 +219,7 @@ pub fn dial(
                     }
                     let spent = tried.elapsed();
                     if spent < RETRY {
-                        std::thread::sleep(RETRY - spent);
+                        horizon_core::sync::sleep(RETRY - spent);
                     }
                 }
             });
@@ -252,7 +252,7 @@ pub fn accept(
                     }
                 }
                 if idle {
-                    std::thread::sleep(Duration::from_millis(20));
+                    horizon_core::sync::sleep(Duration::from_millis(20));
                 }
             }
         });

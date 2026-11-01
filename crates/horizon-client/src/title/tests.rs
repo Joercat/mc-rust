@@ -72,7 +72,7 @@ impl Fixture {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while matches!(self.title.mode, Mode::Backup { .. }) {
             assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            horizon_core::sync::sleep(std::time::Duration::from_millis(10));
             self.title.poll_backup();
         }
     }

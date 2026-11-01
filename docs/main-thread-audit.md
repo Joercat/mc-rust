@@ -1,105 +1,80 @@
 # Main-thread blocking audit
 
 The page's main thread cannot park: `memory.atomic.wait32` throws
-`RuntimeError: Atomics.wait cannot be called in this context` there. Every
-blocking primitive reachable from a `horizon_web_*` export (or from the eframe
-frame update that runs between them) must therefore spin, poll with a deadline,
-or run on a worker.
+`RuntimeError: Atomics.wait cannot be called in this context` there. So no code
+reachable from a `horizon_web_*` export, or from the eframe frame update that
+runs between them, may block.
 
-`horizon_core::sync` is the gate: `may_block()` is false on the page's main
-thread and true everywhere else, `lock`/`read`/`write` spin with `try_lock`
-where blocking is not allowed, and `join`/`sleep` do the same for a thread's
-exit and a duration.
-
-Sweep used for this audit (six crates the client compiles for wasm, tests and
-examples excluded):
+`scripts/audit_main_thread.py` is the audit. It scans every crate compiled into
+the threaded wasm build (`cargo tree --target wasm32-unknown-unknown -p
+horizon-client`), finds every blocking primitive, and requires an explicit
+verdict for each site, exiting non-zero if any site is unclassified:
 
 ```sh
-rg -n -g 'crates/horizon-client*/**/*.rs' -g 'crates/horizon-world/**/*.rs' \
-      -g 'crates/horizon-core/**/*.rs' -g '!**/tests/**' -g '!**/examples/**' \
-      -e '\.lock\(\)' -e '\.read\(\)' -e '\.write\(\)' -e 'recv_timeout\(' \
-      -e '\.recv\(\)' -e 'thread::park' -e 'block_on' -e 'thread::sleep' \
-      -e '\.join\(\)' -e '\.wait\('
+scripts/audit_main_thread.py            # classify; 0 means every site is labelled
+scripts/audit_main_thread.py --groups   # the same, grouped by file::function
+scripts/audit_main_thread.py --rwlock   # RwLocks taken without the shim
 ```
 
-## Fixed in this pass
+Primitives it counts: `.lock()`, `.wait(`/`.wait_timeout(` (condvar),
+`.recv(`/`.recv_timeout(` (channel), `thread::park`/`park_timeout`,
+`thread::sleep`, `block_on`, `.join()`. `std::sync::RwLock` has its own check:
+every `RwLock`-typed field or static is looked up by name and any bare
+`.read()`/`.write()` on it is reported. `.read()`/`.write()` are not in the main
+sweep because the client also uses those names for item-stack accessors, which
+do not block.
 
-Every row was a site the frame could reach; each is now spin-based, polled, or
-routed through the shim.
+Verdicts: `frame-nonparking` (reachable, cannot park by construction),
+`frame-single-owner` (reachable, but only that thread takes the primitive),
+`worker` (a named thread that may block freely), `unreachable` (compiled in, no
+page entry point), `not-wasm` (cfg'd out of the module), `not-a-wait` (named
+like a wait, is not one).
 
-| Crate / file | Site | Before | Now |
-| --- | --- | --- | --- |
-| `horizon-client/src/game.rs` | `save_for_exit` wait loop | `thread::sleep(1 ms)` | `sync::sleep` |
-| `horizon-client/src/game.rs` | world-rest poll loop | `thread::sleep(10 ms)` | `sync::sleep` |
-| `horizon-client/src/game/integrated.rs` | `Integrated::call` | `recv_timeout(10 s)` | `try_recv` poll, 10 s deadline |
-| `horizon-client/src/game/integrated.rs` | `halt` | `JoinHandle::join` | `sync::join` |
-| `horizon-client/src/game/integrated.rs` | `flags.failure` (read, 2 writes) | `Mutex` | `sync::lock` |
-| `horizon-client/src/game/advancements.rs` | pending tree | `JoinHandle::join` | `sync::join` |
-| `horizon-client/src/game/startup_menu.rs` | resource loader | `JoinHandle::join` | `sync::join` |
-| `horizon-client/src/save.rs` | `compress_records` | scoped workers + join | no workers when `!may_block()`, chunks compressed inline |
-| `horizon-client-render/src/gfx/occlusion.rs` | `collect(wait)` | `Receiver::recv` | `recv` only when `may_block()`, else `try_recv` |
-| `horizon-client-render/src/streaming.rs` | `Mailbox::send`/`take`, drop check, test | `Mutex` (3) | `sync::lock` |
-| `horizon-client-render/src/streaming.rs` | `shared.context` read | `RwLock` | `sync::read` |
-| `horizon-client-render/src/streaming.rs` | `Drop` | `JoinHandle::join` | `sync::join` |
-| `horizon-client-render/src/lod.rs` | `shared.jobs`, `worker.jobs`, `shared.observed`, `worker.observed` (21 sites) | `Mutex` | `sync::lock` |
-| `horizon-client-render/src/lod.rs` | `Drop`, worker reap | `JoinHandle::join` (2) | `sync::join` |
-| `horizon-world/src/worldgen/generator_structures.rs` | `RingWork::help` | `Condvar::wait` | `wait` only when `may_block()`, else poll `left` |
-| `horizon-world/src/level/data/cache.rs` | `SOURCES` (3) | `Mutex` | `sync::lock` |
-| `horizon-client-core/src/lang.rs` | `CURRENT` (2) | `RwLock` | `sync::read`/`sync::write` |
-| `horizon-client/src/game/end.rs` | `locator` (3) | `Mutex` | `sync::lock` |
-| `horizon-client/src/game/debug_keys.rs` | session counters | `Mutex` | `sync::lock` |
-| `horizon-client/src/game/chat.rs` | `RESOURCE_IDS` | `Mutex` | `sync::lock` |
-| `horizon-client/src/creative.rs` | `shown` (2) | `Mutex` | `sync::lock` |
-| `horizon-client/src/structure_blocks.rs` | `LOOT` (3) | `Mutex` | `sync::lock` |
-| `horizon-client/src/motion/fluids.rs` | fluid shape cache | `Mutex` | `sync::lock` |
-| `horizon-client/src/item_render.rs` | `translucent` cache | `Mutex` | `sync::lock` |
-| `horizon-client/src/item_render/gui.rs` | `gui_drawn` (2) | `Mutex` | `sync::lock` |
-| `horizon-client/src/game/lan.rs` | `SYNC` (2) | `Mutex` | `sync::lock` |
-| `horizon-client/src/game/world_loading.rs` | `PRELOAD` (2) | `Mutex` | `sync::lock` |
-| `horizon-client/src/content_identity.rs` | `IDENTITIES` | `Mutex` | `sync::lock` |
-| `horizon-client/src/vanillagen/lod.rs` | builder `Drop` | `JoinHandle::join` | `sync::join` |
+## Where it stands
 
-## Already non-parking (checked, left as they are)
+On the shipped tree the script labels all 280 sites it finds in the 20 crates:
+67 `frame-nonparking`, 43 `frame-single-owner`, 45 `worker`, 112 `not-wasm`,
+6 `unreachable`, 7 `not-a-wait`, and 0 unclassified. `--rwlock` reports 0 sites
+taken without the shim.
 
-| Site | Why it cannot park the frame |
-| --- | --- |
-| `streaming.rs` `Mailbox::recv_timeout` | already polls with `try_lock`/`try_recv` under `wasm32` + atomics |
-| `streaming.rs` `Streaming::wait` | already polls with a bounded deadline |
-| `streaming.rs:627` `shared.ready.wait(queue)` | jobs-thread loop; loops only on workers |
-| `lod.rs:692` `shared.wake.wait(jobs)` | jobs-thread loop |
-| `save.rs` `flush` | polls `writes_finished()` when `!may_block()` (30 s cap) |
-| `save.rs:2339` `outstanding.done.wait` | behind the `may_block()` branch above |
-| `hud.rs:493` decode pool | `#[cfg(not(target_arch = "wasm32"))]`; wasm decodes serially |
-| `par.rs` `par_map` | `threads = 1` on wasm, returns before any scope |
-| `world_loading.rs` `ready`/`finish` | threaded path is `#[cfg(not(wasm32))]`; wasm is inline |
-| `generator.rs` / `generator_blocks.rs` joins | `#[cfg(not(wasm32))]`; wasm inline |
-| `horizon-client-input/src/window.rs` sleeps | `#[cfg(not(wasm32))]` |
-| `game/commands/pregen.rs` `streaming.wait` | bounded poll (above) |
-| `mobs/*::block_on_legacy` | pathfinding shim, not a thread wait |
+## What changed to get there
 
-## Worker-only (they may park)
+`horizon_core::sync` now covers every primitive the frame can reach:
 
-`net.rs` reader/receiver threads, `lan/conn.rs` host and client threads,
-`lan/chunks.rs` `pool.ready.wait`, `lan/discovery.rs`, `game/dedicated.rs`
-(dedicated server role), `heartbeat.rs` `park_timeout`, `benchmark.rs`,
-`control.rs`, `game/command_harness.rs`, `game/net_harness.rs`, `packs/cache.rs`
-worker, `packs` test helpers, `gfx.rs` screenshot `recv` (the readback already
-`poll`s indefinitely and never runs in the frame loop), `title/world_management.rs`
-child reaper (desktop `std::process` path), and the `#[test]` sleeps in
-`lod.rs`, `spans.rs`, `sprite_cache.rs`, `title/tests.rs`.
+- `lock`/`read`/`write` accept a `Mutex`/`RwLock` or an `Arc` around one
+  (`MutexLike`, `RwLockLike`), so a call site does not have to know which it
+  holds, and spin with `try_lock` where `may_block()` is false.
+- `join` waits for a thread's `is_finished` before joining, and `sleep` spins out
+  the duration, both only where the caller may not park.
+- Every `.lock()`/`.read()`/`.write()` and every `thread::sleep` in the 20 wasm
+  crates now goes through those, which is why the lock and sleep classes have no
+  unlabelled sites left. A page worker marks itself with `set_may_block(true)`
+  in `horizon_threads::worker_main`, so it still blocks efficiently rather than
+  spinning: the shim changes behaviour on the main thread only.
+- `.join()` call sites the frame reaches go through `sync::join`; `thread::scope`
+  handles (`ScopedJoinHandle`) keep their own `join`, since they are not
+  `JoinHandle`s.
+- Channel waits on the frame poll: `Integrated::call` (`executeBlocking`) uses
+  `try_recv` with a 10 s deadline, the occlusion collector only takes the
+  blocking `recv` when `may_block()`, and the screenshot readback uses
+  `try_recv` because `poll(wait_indefinitely)` has already run the callback.
+- `Condvar::wait` is taken only inside a `may_block()` branch (the save
+  `flush`, the ring search), and `Streaming::wait`/the streamer mailbox poll.
 
-## Not converted, and not proven single-owner
+## What the labels rest on
 
-The rest of the sweep is `Mutex`es that only the frame takes — render caches,
-HUD state, upload queues, `game.rs` world state. A lock only parks when another
-thread holds it, so those are safe *as long as* no worker reaches them. That is
-true by construction for the ones in `horizon-client-render/src/gfx/` (upload
-and atlas rebuilds run on the frame) but I did not trace every remaining site to
-a single owner; they are the gap this audit does not close.
+`frame-nonparking` sites are checked by the script for the shim, a
+`try_`/`is_finished` poll or a `may_block()` guard on the line.
+`frame-single-owner` and `worker` rest on reading the code: the file-level table
+in the script names the owning thread and, for `worker`, a `thread:` label. The
+`pollster::block_on` sites at renderer and pipeline creation are labelled
+`frame-nonparking` because the shipped page runs them at start-up without
+trapping; that is an observation about the product, not a proof from the source.
 
 ## Not observed
 
-There is no browser in this environment: no save was run, no chest was opened,
-and the live Render deploy was not inspected. What is observable here is that
-the module compiles, instantiates, exposes its entry points and shares its
-memory; whether the page survives a third autosave is for the browser to say.
+There is no browser here. No autosave was run, no chest was opened, and the live
+Render service was not checked. What is proven is the list above, that the
+module compiles and links, that it instantiates with shared memory, and that the
+published bytes are the committed bytes. Whether the page now survives a third
+autosave is for the browser to say.

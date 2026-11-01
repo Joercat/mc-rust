@@ -141,7 +141,7 @@ impl Reach {
         } else {
             (None, Some("port mapping is off".into()))
         };
-        let public_ip = stun.join().ok().flatten();
+        let public_ip = horizon_core::sync::join(stun).ok().flatten();
         Self {
             port,
             local,

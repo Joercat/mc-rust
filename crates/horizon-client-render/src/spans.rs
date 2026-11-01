@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn thread_cpu_counts_work_not_sleep() {
         let start = super::thread_cpu().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        horizon_core::sync::sleep(std::time::Duration::from_millis(50));
         let slept = super::thread_cpu().unwrap() - start;
         // Busy until the clock shows 10 ms of work (a loaded machine gives
         // the thread less than its wall time).

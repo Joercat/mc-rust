@@ -178,7 +178,7 @@ fn agent() -> ureq::Agent {
 /// The discovery document, fetched once per game (a failure is retried next time).
 pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
     static CACHE: Mutex<Option<Arc<serde_json::Value>>> = Mutex::new(None);
-    if let Some(d) = CACHE.lock().unwrap().clone() {
+    if let Some(d) = horizon_core::sync::lock(&CACHE).clone() {
         return Ok(d);
     }
     let doc: serde_json::Value = agent()
@@ -189,7 +189,7 @@ pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
         .and_then(|t| serde_json::from_str(&t).ok())
         .ok_or(JoinError::Unavailable)?;
     let doc = Arc::new(doc);
-    *CACHE.lock().unwrap() = Some(doc.clone());
+    *horizon_core::sync::lock(&CACHE) = Some(doc.clone());
     Ok(doc)
 }
 

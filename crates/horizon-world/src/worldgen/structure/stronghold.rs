@@ -642,8 +642,8 @@ impl StrongholdPiece {
         ] {
             self.put(c, slab, x, y, z)?;
         }
-        if !*self.placed.lock().unwrap() && c.chunk_box.is_inside(self.frame.world_pos(3, 2, 3)) {
-            *self.placed.lock().unwrap() = true;
+        if !*horizon_core::sync::lock(&self.placed) && c.chunk_box.is_inside(self.frame.world_pos(3, 2, 3)) {
+            *horizon_core::sync::lock(&self.placed) = true;
             self.frame
                 .create_chest(c, 3, 2, 3, "minecraft:chests/stronghold_corridor")?;
         }
@@ -871,10 +871,10 @@ impl StrongholdPiece {
                 }
             }
         }
-        if !*self.placed.lock().unwrap() {
+        if !*horizon_core::sync::lock(&self.placed) {
             let pos = self.frame.world_pos(5, 3, 6);
             if c.chunk_box.is_inside(pos) {
-                *self.placed.lock().unwrap() = true;
+                *horizon_core::sync::lock(&self.placed) = true;
                 c.spawner(pos, "minecraft:silverfish")?;
             }
         }
@@ -1091,7 +1091,7 @@ impl LegacyPiece for StrongholdPiece {
             Door::Grates => "GRATES",
             Door::Iron => "IRON_DOOR",
         };
-        let placed = *self.placed.lock().unwrap();
+        let placed = *horizon_core::sync::lock(&self.placed);
         let [a, b, c, d] = self.flags;
         let mut entries = vec![("EntryDoor", Tag::String(door.into()))];
         match self.kind {

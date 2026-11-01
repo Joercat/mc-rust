@@ -358,7 +358,7 @@ pub fn vram_mb(vendor: &str) -> Option<u32> {
     static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<u32>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = horizon_core::sync::lock(&cache);
     *cache.entry(vendor.to_ascii_lowercase()).or_insert_with(|| {
         read_vram_mb(&vendor.to_ascii_lowercase()).map(|mb| mb.div_ceil(256) * 256)
     })

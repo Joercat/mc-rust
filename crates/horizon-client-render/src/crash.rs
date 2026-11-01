@@ -62,7 +62,7 @@ fn contained_panic(info: &std::panic::PanicHookInfo) -> bool {
 
 /// Sets one line of the report's details (replacing the last value under `key`).
 pub fn set_detail(key: &'static str, value: impl Into<String>) {
-    let mut details = DETAILS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut details = horizon_core::sync::lock(&DETAILS);
     let value = value.into();
     match details.iter_mut().find(|(k, _)| *k == key) {
         Some(entry) => entry.1 = value,
@@ -71,14 +71,12 @@ pub fn set_detail(key: &'static str, value: impl Into<String>) {
 }
 
 pub fn clear_detail(key: &'static str) {
-    DETAILS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    horizon_core::sync::lock(&DETAILS)
         .retain(|(k, _)| *k != key);
 }
 
 fn details() -> Vec<(&'static str, String)> {
-    DETAILS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    horizon_core::sync::lock(&DETAILS).clone()
 }
 
 /// Vanilla picks a line from a list of jokes; these only say what happened.
@@ -709,12 +707,12 @@ mod tests {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if panic_message(info).contains("the test crash") {
-                *sink.lock().unwrap() = Some(panic_report(info, "client"));
+                *horizon_core::sync::lock(&sink) = Some(panic_report(info, "client"));
             }
         }));
         let _ = std::panic::catch_unwind(|| panic!("the test crash"));
         std::panic::set_hook(previous);
-        let report = caught.lock().unwrap().take().expect("the hook ran");
+        let report = horizon_core::sync::lock(&caught).take().expect("the hook ran");
         assert!(report.error.contains("the test crash"));
         assert!(report.error.contains("crash.rs"));
         // The first frame is the test's own code, not the panic machinery.

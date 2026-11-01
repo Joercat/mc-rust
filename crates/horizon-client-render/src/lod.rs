@@ -2116,7 +2116,7 @@ mod tests {
                     return meshes;
                 }
                 assert!(std::time::Instant::now() < deadline, "mesh worker stalled");
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                horizon_core::sync::sleep(std::time::Duration::from_millis(1));
             }
         };
         let uploaded = await_meshes(&mut lod);
@@ -2167,7 +2167,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "covered normal chunk remained an active LOD mask"
             );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            horizon_core::sync::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(lod.progress(), (1, 1));
 

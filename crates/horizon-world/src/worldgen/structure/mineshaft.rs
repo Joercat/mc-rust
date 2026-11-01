@@ -567,11 +567,11 @@ impl MineshaftPiece {
             if c.random.int(100) == 0 {
                 self.minecart_chest(c, 0, 0, z + 1)?;
             }
-            if spider && !*placed_spider.lock().unwrap() {
+            if spider && !*horizon_core::sync::lock(&placed_spider) {
                 let nz = z - 1 + c.random.int(3);
                 let pos = f.world_pos(1, 0, nz);
                 if c.chunk_box.is_inside(pos) && f.is_interior(c, 1, 0, nz)? {
-                    *placed_spider.lock().unwrap() = true;
+                    *horizon_core::sync::lock(&placed_spider) = true;
                     c.spawner(pos, "minecraft:cave_spider")?;
                 }
             }
@@ -769,7 +769,7 @@ impl LegacyPiece for MineshaftPiece {
             } => entries.extend([
                 ("hr", flag(*rails)),
                 ("sc", flag(*spider)),
-                ("hps", flag(*placed_spider.lock().unwrap())),
+                ("hps", flag(*horizon_core::sync::lock(&placed_spider))),
                 ("Num", Tag::Int(*sections)),
             ]),
             Kind::Crossing {

@@ -47,7 +47,7 @@ impl Game<'_> {
         let server = self.integrated.take().ok_or("command harness: no server")?;
         while !server.stopped() {
             self.poll_stationary_client()?;
-            std::thread::sleep(Duration::from_millis(2));
+            horizon_core::sync::sleep(Duration::from_millis(2));
         }
         server.stop()
     }
@@ -153,7 +153,7 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("command harness: terrain did not load".into());
             }
-            std::thread::sleep(Duration::from_millis(2));
+            horizon_core::sync::sleep(Duration::from_millis(2));
         }
     }
     pub(super) fn run_command_harness(&mut self, script: &Path, output: &Path) -> Result<()> {
@@ -174,7 +174,7 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("command harness: owner did not connect".into());
             }
-            std::thread::sleep(Duration::from_millis(2));
+            horizon_core::sync::sleep(Duration::from_millis(2));
         }
         self.harness_owner(|g| g.harness_settle(deadline))?;
         let mut out = String::new();
@@ -229,7 +229,7 @@ impl Game<'_> {
                         if Instant::now() > deadline {
                             return Err("command harness: portal did not arrive".into());
                         }
-                        std::thread::sleep(Duration::from_millis(2));
+                        horizon_core::sync::sleep(Duration::from_millis(2));
                     }
                     self.harness_owner(|g| g.harness_settle(deadline))?;
                 }

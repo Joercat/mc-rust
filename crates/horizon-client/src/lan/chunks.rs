@@ -362,7 +362,7 @@ fn warm_pool() -> Option<&'static WarmPool> {
                         let mut done = 0;
                         loop {
                             let job = {
-                                let mut slot = pool.job.lock().unwrap();
+                                let mut slot = horizon_core::sync::lock(&pool.job);
                                 while slot.0 == done {
                                     slot = pool.ready.wait(slot).unwrap();
                                 }
@@ -445,7 +445,7 @@ impl ChunkEncoder {
     /// The client heightmaps (Heightmap.prime over the column), from the
     /// cache while the column's sections are unchanged.
     fn heightmaps(&self, chunk: &Chunk, tables: &crate::save::SaveTables) -> ColumnHeightmaps {
-        let mut heights = self.heights.lock().unwrap();
+        let mut heights = horizon_core::sync::lock(&self.heights);
         if let Some(maps) = cached_heights(&heights, chunk) {
             return maps;
         }
@@ -470,7 +470,7 @@ impl ChunkEncoder {
 
     /// The cached entry for a section, made with `non_air` when missing.
     fn cached<T>(&self, section: &Arc<Section>, read: impl FnOnce(&mut Encoded) -> T) -> T {
-        read(self.entry(&mut self.cache.lock().unwrap(), section))
+        read(self.entry(&mut horizon_core::sync::lock(&self.cache), section))
     }
 
     /// A section's entry in the locked cache, made with `non_air` when missing.
@@ -549,7 +549,7 @@ impl ChunkEncoder {
     fn occupied(&self, chunk: &Chunk) -> u64 {
         let mut bits = 0u64;
         // One lock for the column: body_in asks for nine columns' sections.
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.cache);
         for (i, s) in chunk.sections[self.sections.clone()].iter().enumerate() {
             if self.entry(&mut cache, s).non_air {
                 bits |= 1 << i;
@@ -597,7 +597,7 @@ impl ChunkEncoder {
         };
         let job = Arc::new(job);
         {
-            let mut slot = pool.job.lock().unwrap();
+            let mut slot = horizon_core::sync::lock(&pool.job);
             slot.0 += 1;
             slot.1 = Some(job.clone());
         }
@@ -605,7 +605,7 @@ impl ChunkEncoder {
         job.run();
         // Everything is claimed: the job leaves the slot.
         {
-            let mut slot = pool.job.lock().unwrap();
+            let mut slot = horizon_core::sync::lock(&pool.job);
             if slot.1.as_ref().is_some_and(|j| Arc::ptr_eq(j, &job)) {
                 slot.1 = None;
             }
@@ -619,7 +619,7 @@ impl ChunkEncoder {
     fn job(&self, columns: &[&Chunk]) -> Option<Warm> {
         let stale: Vec<((i32, i32), Vec<Arc<Section>>)> = match &self.tables {
             Some(_) => {
-                let heights = self.heights.lock().unwrap();
+                let heights = horizon_core::sync::lock(&self.heights);
                 let mut seen = crate::fast_hash::FxHashSet::default();
                 columns
                     .iter()
@@ -630,7 +630,7 @@ impl ChunkEncoder {
             None => Vec::new(),
         };
         let sections: Vec<Arc<Section>> = {
-            let cache = self.cache.lock().unwrap();
+            let cache = horizon_core::sync::lock(&self.cache);
             columns
                 .iter()
                 .flat_map(|c| &c.sections[self.sections.clone()])
@@ -660,14 +660,14 @@ impl ChunkEncoder {
     /// Cache what a job's threads have finished.
     fn keep(&self, job: &Warm) {
         {
-            let mut heights = self.heights.lock().unwrap();
+            let mut heights = horizon_core::sync::lock(&self.heights);
             for ((key, sections), done) in job.columns.iter().zip(&job.heights) {
                 if let Some(maps) = done.get() {
                     keep_heights(&mut heights, *key, sections, maps);
                 }
             }
         }
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.cache);
         for (s, done) in job.sections.iter().zip(&job.done) {
             if let Some((wire, light)) = done.get() {
                 let e = self.entry(&mut cache, s);
@@ -1463,7 +1463,7 @@ mod tests {
         assert_eq!((job.columns.len(), job.sections.len()), (16, 17 * SECTIONS));
         job.run();
         cold.keep(&job);
-        assert_eq!(cold.heights.lock().unwrap().len(), 16);
+        assert_eq!(horizon_core::sync::lock(&cold.heights).len(), 16);
         assert_eq!(bodies(&cold), expected);
         // Again, from the cache, with nothing left to warm.
         warmed.warm(&chunks);

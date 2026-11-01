@@ -489,7 +489,7 @@ mod tests {
             if let Some(b) = queue.finished().pop() {
                 break b;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            horizon_core::sync::sleep(std::time::Duration::from_millis(10));
         };
         server.join().unwrap();
         let file = dir

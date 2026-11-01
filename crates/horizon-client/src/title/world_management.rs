@@ -56,7 +56,7 @@ pub fn delete(saves: &Path, folder: &str) -> crate::Result<()> {
             Err(e) if attempt >= 5 => return Err(e.into()),
             Err(e) => {
                 log::warn!("Failed to delete {}: {e}", world.display());
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                horizon_core::sync::sleep(std::time::Duration::from_millis(500));
             }
         }
     }

@@ -114,7 +114,7 @@ impl Watchdog {
             }
             // Thread.sleep(nextTickTime + maxTickTime - now).
             let wait = (next + max).saturating_sub(now).max(1_000_000);
-            std::thread::sleep(Duration::from_nanos(wait));
+            horizon_core::sync::sleep(Duration::from_nanos(wait));
         }
     }
 }
@@ -150,7 +150,7 @@ static USER_CACHE: Mutex<Option<UserCache>> = Mutex::new(None);
 
 /// PlayerList.placeNewPlayer: a player who joined is cached (and the file saved).
 pub(super) fn player_joined(id: u128, name: &str) {
-    if let Some(cache) = USER_CACHE.lock().unwrap().as_mut() {
+    if let Some(cache) = horizon_core::sync::lock(&USER_CACHE).as_mut() {
         cache.add(NameAndId {
             id,
             name: name.to_owned(),
@@ -537,7 +537,7 @@ impl Game<'_> {
             started,
         } = SETUP
             .get()
-            .and_then(|m| m.lock().unwrap().take())
+            .and_then(|m| horizon_core::sync::lock(&m).take())
             .ok_or("dedicated server not prepared")?;
         // Main's WorldLoader: a new world's dimensions come from
         // server.properties before the server starts.
@@ -570,7 +570,7 @@ impl Game<'_> {
         }
         // DedicatedServer.initServer: names nobody has resolve offline only without authentication.
         cache.resolve_offline_users = !props.online_mode;
-        *USER_CACHE.lock().unwrap() = Some(cache);
+        *horizon_core::sync::lock(&USER_CACHE) = Some(cache);
         // Services.create: the services' public keys, fetched in the
         // background (they check players' chat keys).
         let secure_chat = Arc::new(horizon_client::lan::SecureChat::new(
@@ -674,7 +674,7 @@ impl Game<'_> {
                 id: uuid,
                 name: name.to_owned(),
             };
-            gate_lists.lock().unwrap().can_login(address, &user)
+            horizon_core::sync::lock(&gate_lists).can_login(address, &user)
         });
         let bypass_lists = lists.clone();
         let favicon = horizon_core::vfs::read("server-icon.png")
@@ -697,9 +697,7 @@ impl Game<'_> {
             announce: false,
             listen: true,
             bypasses_limit: Some(Arc::new(move |uuid| {
-                bypass_lists
-                    .lock()
-                    .unwrap()
+                horizon_core::sync::lock(&bypass_lists)
                     .ops
                     .entries()
                     .iter()
@@ -850,7 +848,7 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("the spawn area did not load".into());
             }
-            std::thread::sleep(Duration::from_millis(2));
+            horizon_core::sync::sleep(Duration::from_millis(2));
         }
         self.player = None;
         Ok(())
@@ -903,9 +901,7 @@ impl Game<'_> {
         let Some(host) = self.lan.as_mut() else {
             return;
         };
-        host.hub.ops = lists
-            .lock()
-            .unwrap()
+        host.hub.ops = horizon_core::sync::lock(&lists)
             .ops
             .entries()
             .iter()
@@ -931,7 +927,7 @@ impl Game<'_> {
     /// service, else (offline) the offline player. None, told to the console:
     /// no such player.
     fn resolve(&self, name: &str) -> Option<NameAndId> {
-        let found = USER_CACHE.lock().unwrap().as_mut().and_then(|cache| {
+        let found = horizon_core::sync::lock(&USER_CACHE).as_mut().and_then(|cache| {
             cache.get_by_name(name, |lower| {
                 let found = profiles::find_by_name(&profiles::discovery_url(), lower);
                 if found.is_none() {
@@ -1054,7 +1050,7 @@ impl Game<'_> {
                 };
                 let level = state.op_level;
                 let changed = {
-                    let mut l = state.lists.lock().unwrap();
+                    let mut l = horizon_core::sync::lock(&state.lists);
                     if command == "op" {
                         if l.ops.contains(&user) {
                             false
@@ -1089,7 +1085,7 @@ impl Game<'_> {
                     return;
                 };
                 let reason = (rest.len() > 1).then(|| rest[1..].join(" "));
-                let added = state.lists.lock().unwrap().bans.add(BanEntry::new(
+                let added = horizon_core::sync::lock(&state.lists).bans.add(BanEntry::new(
                     user.clone(),
                     Some("Server".into()),
                     None,
@@ -1134,7 +1130,7 @@ impl Game<'_> {
                     return;
                 };
                 let reason = (rest.len() > 1).then(|| rest[1..].join(" "));
-                let added = state.lists.lock().unwrap().ip_bans.add(BanEntry::new(
+                let added = horizon_core::sync::lock(&state.lists).ip_bans.add(BanEntry::new(
                     ip.clone(),
                     Some("Server".into()),
                     None,
@@ -1180,7 +1176,7 @@ impl Game<'_> {
                 let Some(user) = self.resolve(rest[0]) else {
                     return;
                 };
-                let removed = state.lists.lock().unwrap().bans.remove(&user);
+                let removed = horizon_core::sync::lock(&state.lists).bans.remove(&user);
                 let key = if removed {
                     "commands.pardon.success"
                 } else {
@@ -1194,7 +1190,7 @@ impl Game<'_> {
                     self.console_reply(Text::translate("commands.pardonip.invalid", &[]));
                     return;
                 }
-                let removed = state.lists.lock().unwrap().ip_bans.remove(&ip);
+                let removed = horizon_core::sync::lock(&state.lists).ip_bans.remove(&ip);
                 let key = if removed {
                     "commands.pardonip.success"
                 } else {
@@ -1203,7 +1199,7 @@ impl Game<'_> {
                 self.console_reply(Text::translate(key, &[lit(&ip)]));
             }
             "banlist" => {
-                let l = state.lists.lock().unwrap();
+                let l = horizon_core::sync::lock(&state.lists);
                 let mut lines = Vec::new();
                 let which = rest.first().copied().unwrap_or("");
                 if which != "ips" {
@@ -1292,7 +1288,7 @@ impl Game<'_> {
         match rest {
             ["on"] | ["off"] => {
                 let on = rest[0] == "on";
-                let mut l = state.lists.lock().unwrap();
+                let mut l = horizon_core::sync::lock(&state.lists);
                 let turned_on = on && !l.use_whitelist;
                 let key = match (on, l.use_whitelist) {
                     (true, true) => "commands.whitelist.alreadyOn",
@@ -1310,10 +1306,7 @@ impl Game<'_> {
                 }
             }
             ["list"] => {
-                let names: Vec<String> = state
-                    .lists
-                    .lock()
-                    .unwrap()
+                let names: Vec<String> = horizon_core::sync::lock(&state.lists)
                     .white
                     .entries()
                     .iter()
@@ -1329,7 +1322,7 @@ impl Game<'_> {
                 }
             }
             ["reload"] => {
-                let _ = state.lists.lock().unwrap().white.load();
+                let _ = horizon_core::sync::lock(&state.lists).white.load();
                 self.console_reply(Text::translate("commands.whitelist.reloaded", &[]));
                 let lists = state.lists.clone();
                 self.kick_unlisted_players(&lists);
@@ -1338,7 +1331,7 @@ impl Game<'_> {
                 let Some(user) = self.resolve(name) else {
                     return;
                 };
-                let mut l = state.lists.lock().unwrap();
+                let mut l = horizon_core::sync::lock(&state.lists);
                 let (ok, key) = if rest[0] == "add" {
                     if l.white.contains(&user) {
                         (false, "commands.whitelist.add.failed")
@@ -1382,7 +1375,7 @@ impl Game<'_> {
     /// disconnected (operators are not spared here).
     fn kick_unlisted_players(&mut self, lists: &Arc<Mutex<Lists>>) {
         let unlisted: Vec<u128> = {
-            let l = lists.lock().unwrap();
+            let l = horizon_core::sync::lock(&lists);
             let Some(host) = self.lan.as_ref() else {
                 return;
             };
@@ -1465,7 +1458,7 @@ impl Game<'_> {
                 );
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        horizon_core::sync::sleep(Duration::from_millis(100));
         log("INFO", "Saving worlds");
         // ServerPlayer.disconnect: nobody is left in a bed.
         self.free_player_beds()?;

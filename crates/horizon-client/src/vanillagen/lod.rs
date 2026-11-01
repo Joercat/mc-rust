@@ -82,7 +82,7 @@ impl Builder {
                 let mut state = generator.worker();
                 loop {
                     let key = {
-                        let mut requests = worker.requests.lock().unwrap();
+                        let mut requests = horizon_core::sync::lock(&worker.requests);
                         while requests.chunks.is_empty() && !worker.stop.load(Ordering::Relaxed) {
                             requests = worker.wake.wait(requests).unwrap();
                         }
@@ -102,13 +102,13 @@ impl Builder {
                     let result = decorated_batch(&mut state, key, BATCH, &worker.stop, |chunk| {
                         let pos = chunk.position();
                         let key = (pos.x, pos.z);
-                        worker.requests.lock().unwrap().finished.insert(key);
+                        horizon_core::sync::lock(&worker.requests).finished.insert(key);
                         let columns = columns(chunk, &terrain.biome_map, &terrain.dimension);
                         if tx.send((key, columns)).is_err() {
                             worker.stop.store(true, Ordering::Relaxed);
                         }
                     });
-                    worker.requests.lock().unwrap().current = None;
+                    horizon_core::sync::lock(&worker.requests).current = None;
                     match result {
                         Ok(_) => {}
                         Err(error) => {
@@ -137,7 +137,7 @@ impl Builder {
         if self.shared.stop.load(Ordering::Relaxed) {
             return;
         }
-        let mut requests = self.shared.requests.lock().unwrap();
+        let mut requests = horizon_core::sync::lock(&self.shared.requests);
         requests.center = center;
         for &key in chunks {
             if requests.current != Some(batch_origin(key)) && !requests.finished.contains(&key) {
@@ -376,11 +376,7 @@ impl LodSampler for VanillaLodSampler {
             while self.cache.len() > CACHE {
                 if let Some(old) = self.order.pop_front() {
                     self.cache.remove(&old);
-                    builder
-                        .shared
-                        .requests
-                        .lock()
-                        .unwrap()
+                    horizon_core::sync::lock(&builder.shared.requests)
                         .finished
                         .remove(&old);
                 }
@@ -643,7 +639,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "decoration worker stalled"
             );
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            horizon_core::sync::sleep(std::time::Duration::from_millis(5));
         };
         let count = |suffix: &str| {
             generated

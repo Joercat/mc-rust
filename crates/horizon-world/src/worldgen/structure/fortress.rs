@@ -712,7 +712,7 @@ impl FortressPiece {
         self.corridor_roof(c, p)
     }
     fn corridor_chest(&self, c: &mut PieceContext<'_>, [x, y, z]: [i32; 3]) -> Result<()> {
-        let mut needed = self.flag.lock().unwrap();
+        let mut needed = horizon_core::sync::lock(&self.flag);
         if *needed && c.chunk_box.is_inside(self.frame.world_pos(x, y, z)) {
             *needed = false;
             self.frame
@@ -797,7 +797,7 @@ impl FortressPiece {
         self.put(c, p.we, 3, 8, 8)?;
         self.put(c, west, 4, 8, 8)?;
         {
-            let mut placed = self.flag.lock().unwrap();
+            let mut placed = horizon_core::sync::lock(&self.flag);
             if !*placed {
                 let pos = self.frame.world_pos(3, 5, 5);
                 if c.chunk_box.is_inside(pos) {
@@ -879,7 +879,7 @@ impl LegacyPiece for FortressPiece {
             self.frame.orientation,
             self.depth,
         );
-        let flag = Tag::Byte(i8::from(*self.flag.lock().unwrap()));
+        let flag = Tag::Byte(i8::from(*horizon_core::sync::lock(&self.flag)));
         match self.kind {
             Kind::BridgeEndFiller => {
                 tag.insert("Seed".into(), Tag::Int(self.seed));

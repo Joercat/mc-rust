@@ -97,7 +97,7 @@ impl Game<'_> {
                 }
                 _ => {}
             }
-            std::thread::sleep(Duration::from_millis(5));
+            horizon_core::sync::sleep(Duration::from_millis(5));
         }
         if step < 3 && error.is_none() {
             error = Some(format!("timed out at step {step}"));

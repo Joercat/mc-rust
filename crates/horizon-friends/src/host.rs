@@ -97,7 +97,7 @@ struct Shared {
 }
 impl Shared {
     fn emit(&self, e: HostEvent) {
-        let _ = self.events.lock().unwrap().send(e);
+        let _ = horizon_core::sync::lock(&self.events).send(e);
     }
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
@@ -105,7 +105,7 @@ impl Shared {
     /// Rebuild the code from the invite and the relay's short code.
     fn publish(&self, short: Option<Code>) {
         let text = {
-            let mut invite = self.invite.lock().unwrap();
+            let mut invite = horizon_core::sync::lock(&self.invite);
             let Some(inv) = invite.as_mut() else { return };
             inv.relay = match (&short, &self.config.relay) {
                 (Some(code), Some(address)) => Some(RelayRef {
@@ -117,7 +117,7 @@ impl Shared {
             inv.encode()
         };
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = horizon_core::sync::lock(&self.state);
             if s.invite.as_deref() == Some(&text) && s.short == short {
                 return;
             }
@@ -177,7 +177,7 @@ impl Host {
         })
     }
     pub fn state(&self) -> HostState {
-        self.shared.state.lock().unwrap().clone()
+        horizon_core::sync::lock(&self.shared.state).clone()
     }
     pub fn poll(&self) -> Vec<HostEvent> {
         self.events.try_iter().collect()
@@ -191,13 +191,13 @@ impl Host {
     /// closes them.
     pub fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(c) = self.shared.control.lock().unwrap().take() {
+        if let Some(c) = horizon_core::sync::lock(&self.shared.control).take() {
             let _ = c.shutdown(Shutdown::Both);
         }
         for t in self.threads.drain(..) {
-            let _ = t.join();
+            let _ = horizon_core::sync::join(t);
         }
-        if let Some(r) = self.shared.reach.lock().unwrap().as_mut() {
+        if let Some(r) = horizon_core::sync::lock(&self.shared.reach).as_mut() {
             r.release();
         }
     }
@@ -230,7 +230,7 @@ fn share(shared: Arc<Shared>, port: u16) {
         Err(_) => return,
     };
     {
-        let mut s = shared.state.lock().unwrap();
+        let mut s = horizon_core::sync::lock(&shared.state);
         s.summary = if config.path == PathMode::RelayOnly {
             "Friends join through the relay only.".into()
         } else {
@@ -238,8 +238,8 @@ fn share(shared: Arc<Shared>, port: u16) {
         };
         s.verdict = Some(reach.verdict());
     }
-    *shared.invite.lock().unwrap() = Some(invite);
-    *shared.reach.lock().unwrap() = Some(reach);
+    *horizon_core::sync::lock(&shared.invite) = Some(invite);
+    *horizon_core::sync::lock(&shared.reach) = Some(reach);
     if shared.stopped() {
         return;
     }
@@ -257,8 +257,8 @@ fn share(shared: Arc<Shared>, port: u16) {
     };
     // Renew the router mapping at half-lease until stopped.
     while !shared.stopped() {
-        std::thread::sleep(Duration::from_millis(100));
-        let mut reach = shared.reach.lock().unwrap();
+        horizon_core::sync::sleep(Duration::from_millis(100));
+        let mut reach = horizon_core::sync::lock(&shared.reach);
         if let Some(m) = reach.as_mut().and_then(|r| r.mapping.as_mut())
             && m.due()
             && m.renew().is_err()
@@ -268,7 +268,7 @@ fn share(shared: Arc<Shared>, port: u16) {
         }
     }
     if let Some(t) = relay {
-        let _ = t.join();
+        let _ = horizon_core::sync::join(t);
     }
 }
 
@@ -297,7 +297,7 @@ fn route_inbound(listeners: Vec<TcpListener>, shared: Arc<Shared>) {
                         Ok(direct::Hello::Relayed(session)) => {
                             shared.handshakes.fetch_sub(1, Ordering::Relaxed);
                             let route = {
-                                let mut routes = shared.routes.lock().unwrap();
+                                let mut routes = horizon_core::sync::lock(&shared.routes);
                                 routes.retain(|_, (_, until)| *until > Instant::now());
                                 routes.get(&session).map(|(tx, _)| tx.clone())
                             };
@@ -317,7 +317,7 @@ fn route_inbound(listeners: Vec<TcpListener>, shared: Arc<Shared>) {
                 });
         }
         if idle {
-            std::thread::sleep(Duration::from_millis(20));
+            horizon_core::sync::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -326,10 +326,7 @@ fn route_inbound(listeners: Vec<TcpListener>, shared: Arc<Shared>) {
 /// the code's secret, then carry the session (`deadline` bounds the
 /// handshake, not the game).
 fn serve_code(shared: &Arc<Shared>, mut s: TcpStream, session: u64, deadline: crate::Deadline) {
-    let secret = shared
-        .invite
-        .lock()
-        .unwrap()
+    let secret = horizon_core::sync::lock(&shared.invite)
         .as_ref()
         .map(Invite::secret_text);
     let secured = (|| -> io::Result<session::Secure> {
@@ -364,7 +361,7 @@ fn carry(shared: &Arc<Shared>, session: u64, (r, w): session::Secure, direct: bo
     };
     shared.emit(HostEvent::Connected { session, direct });
     if let Ok(t) = crate::pump(server, r, w) {
-        let _ = t.join();
+        let _ = horizon_core::sync::join(t);
     }
     shared.sessions.fetch_sub(1, Ordering::Relaxed);
     shared.emit(HostEvent::Disconnected { session });
@@ -394,18 +391,18 @@ fn run_relay(shared: Arc<Shared>, relay: String) {
         match register(&shared, &relay) {
             Ok(()) => {
                 backoff = Duration::from_secs(1);
-                shared.state.lock().unwrap().relay_problem = None;
+                horizon_core::sync::lock(&shared.state).relay_problem = None;
             }
             Err(e) => {
                 if shared.stopped() {
                     break;
                 }
-                shared.state.lock().unwrap().relay_problem =
+                horizon_core::sync::lock(&shared.state).relay_problem =
                     Some(format!("Couldn't reach the relay {relay}: {e}"));
                 shared.publish(None);
                 let until = Instant::now() + backoff;
                 while Instant::now() < until && !shared.stopped() {
-                    std::thread::sleep(Duration::from_millis(50));
+                    horizon_core::sync::sleep(Duration::from_millis(50));
                 }
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
@@ -415,7 +412,7 @@ fn run_relay(shared: Arc<Shared>, relay: String) {
 
 fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
     let config = &shared.config;
-    let port = Some(shared.state.lock().unwrap().port);
+    let port = Some(horizon_core::sync::lock(&shared.state).port);
     // The control connection uses any port: the direct port stays free for
     // the attach connections, whose observed address is the one that counts.
     let (mut control, relay) = connect_relay(relay_url, None)?;
@@ -439,7 +436,7 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
         other => return Err(io::Error::other(format!("unexpected answer {other:?}"))),
     };
     let code = Code::new(&nameplate)?;
-    *shared.control.lock().unwrap() = Some(control.try_clone()?);
+    *horizon_core::sync::lock(&shared.control) = Some(control.try_clone()?);
     if shared.stopped() {
         let _ = control.shutdown(Shutdown::Both);
         return Ok(());
@@ -450,7 +447,7 @@ fn register(shared: &Arc<Shared>, relay_url: &str) -> io::Result<()> {
         let message = match wire::recv_buffered::<_, FromRelay>(&mut reader) {
             Ok(m) => m,
             Err(e) => {
-                shared.control.lock().unwrap().take();
+                horizon_core::sync::lock(&shared.control).take();
                 return if shared.stopped()
                     || shared.relay_wrong.load(Ordering::Relaxed) >= MAX_WRONG
                 {
@@ -547,14 +544,11 @@ fn serve_relayed(
         port,
         candidates,
         Box::new(move |tx, deadline, _stop| {
-            routes
-                .routes
-                .lock()
-                .unwrap()
+            horizon_core::sync::lock(&routes.routes)
                 .insert(session, (tx, deadline + Duration::from_millis(500)));
         }),
     );
-    shared.routes.lock().unwrap().remove(&session);
+    horizon_core::sync::lock(&shared.routes).remove(&session);
     if let Ok(settled) = settled {
         carry(shared, session, settled.secure, settled.direct);
     }

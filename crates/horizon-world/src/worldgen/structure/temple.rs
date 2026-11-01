@@ -84,7 +84,7 @@ impl LegacyPiece for DesertPyramidPiece {
     }
     fn save(&self) -> Option<crate::nbt::Compound> {
         let mut tag = self.base.saved("minecraft:tedp");
-        for (i, placed) in self.placed_chest.lock().unwrap().iter().enumerate() {
+        for (i, placed) in horizon_core::sync::lock(&self.placed_chest).iter().enumerate() {
             tag.insert(
                 format!("hasPlacedChest{i}").as_str().into(),
                 crate::nbt::Tag::Byte(i8::from(*placed)),
@@ -303,7 +303,7 @@ impl LegacyPiece for DesertPyramidPiece {
             f.place(c, cut, ox, -11, oz)?;
         }
         for (i, d) in HORIZONTAL.into_iter().enumerate() {
-            if !self.placed_chest.lock().unwrap()[i] {
+            if !horizon_core::sync::lock(&self.placed_chest)[i] {
                 let s = d.normal();
                 let placed = f.create_chest(
                     c,
@@ -312,7 +312,7 @@ impl LegacyPiece for DesertPyramidPiece {
                     10 + s[2] * 2,
                     "minecraft:chests/desert_pyramid",
                 )?;
-                self.placed_chest.lock().unwrap()[i] = placed;
+                horizon_core::sync::lock(&self.placed_chest)[i] = placed;
             }
         }
         // addCellar: stairs, then the room.
@@ -409,7 +409,7 @@ impl LegacyPiece for DesertPyramidPiece {
     }
     /// DesertPyramidStructure.afterPlace.
     fn after_place(&self, c: &mut PieceContext<'_>, pieces: &[BoundingBox]) -> Result<()> {
-        if *self.base.height_position.lock().unwrap() < 0 {
+        if *horizon_core::sync::lock(&self.base.height_position) < 0 {
             return Ok(());
         }
         let seed = c.world.seed()?;
@@ -460,7 +460,7 @@ impl LegacyPiece for JungleTemplePiece {
     }
     fn save(&self) -> Option<crate::nbt::Compound> {
         let mut tag = self.base.saved("minecraft:tejp");
-        let placed = *self.placed.lock().unwrap();
+        let placed = *horizon_core::sync::lock(&self.placed);
         for (key, value) in [
             "placedMainChest",
             "placedHiddenChest",
@@ -638,9 +638,9 @@ impl LegacyPiece for JungleTemplePiece {
         )?;
         f.place(c, mossy, 3, -3, 1)?;
         let dispenser = "minecraft:chests/jungle_temple_dispenser";
-        if !self.placed.lock().unwrap()[2] {
+        if !horizon_core::sync::lock(&self.placed)[2] {
             let placed = f.create_dispenser(c, 3, -2, 1, Direction::North, dispenser)?;
-            self.placed.lock().unwrap()[2] = placed;
+            horizon_core::sync::lock(&self.placed)[2] = placed;
         }
         f.place(c, c.state_with("vine", &[("south", "true")]), 3, -2, 2)?;
         f.place(c, hook(c, "north"), 7, -3, 1)?;
@@ -671,16 +671,16 @@ impl LegacyPiece for JungleTemplePiece {
         )?;
         f.place(c, mossy, 9, -3, 4)?;
         f.place(c, ns, 9, -2, 4)?;
-        if !self.placed.lock().unwrap()[3] {
+        if !horizon_core::sync::lock(&self.placed)[3] {
             let placed = f.create_dispenser(c, 9, -2, 3, Direction::West, dispenser)?;
-            self.placed.lock().unwrap()[3] = placed;
+            horizon_core::sync::lock(&self.placed)[3] = placed;
         }
         let vine_east = c.state_with("vine", &[("east", "true")]);
         f.place(c, vine_east, 8, -1, 3)?;
         f.place(c, vine_east, 8, -2, 3)?;
-        if !self.placed.lock().unwrap()[0] {
+        if !horizon_core::sync::lock(&self.placed)[0] {
             let placed = f.create_chest(c, 8, -3, 3, "minecraft:chests/jungle_temple")?;
-            self.placed.lock().unwrap()[0] = placed;
+            horizon_core::sync::lock(&self.placed)[0] = placed;
         }
         for [x, y, z] in [
             [9, -3, 2],
@@ -742,9 +742,9 @@ impl LegacyPiece for JungleTemplePiece {
             -2,
             10,
         )?;
-        if !self.placed.lock().unwrap()[1] {
+        if !horizon_core::sync::lock(&self.placed)[1] {
             let placed = f.create_chest(c, 9, -3, 10, "minecraft:chests/jungle_temple")?;
-            self.placed.lock().unwrap()[1] = placed;
+            horizon_core::sync::lock(&self.placed)[1] = placed;
         }
         Ok(())
     }

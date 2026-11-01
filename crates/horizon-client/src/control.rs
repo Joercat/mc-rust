@@ -279,7 +279,7 @@ fn spawn_listener<S: Send + 'static>(
                     return;
                 }
                 let Ok(stream) = next else {
-                    thread::sleep(std::time::Duration::from_millis(10));
+                    horizon_core::sync::sleep(std::time::Duration::from_millis(10));
                     continue;
                 };
                 let sender = sender.clone();
@@ -383,7 +383,7 @@ mod tests {
             if let Some(r) = server.try_recv() {
                 break r;
             }
-            thread::sleep(std::time::Duration::from_millis(5));
+            horizon_core::sync::sleep(std::time::Duration::from_millis(5));
         };
         assert_eq!(request.line, "status");
         request.reply.send(r#"{"ok":true}"#.into()).unwrap();

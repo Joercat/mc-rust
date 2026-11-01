@@ -345,7 +345,7 @@ impl VanillaTerrain {
         x: i32,
         z: i32,
     ) -> Vec<Arc<horizon_world::worldgen::structure::start::StructureStart>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
+        let mut worker = horizon_core::sync::lock(&self.query);
         let worker = worker.get_or_insert_with(|| self.generator.worker());
         worker.structure_starts(ChunkPos::new(x, z))
     }
@@ -364,14 +364,14 @@ impl VanillaTerrain {
         &self,
         search: &horizon_world::worldgen::generator::BiomeSearch<'_>,
     ) -> Option<(String, [i32; 3])> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
+        let mut worker = horizon_core::sync::lock(&self.query);
         let worker = worker.get_or_insert_with(|| self.generator.worker());
         worker.find_closest_biome(search)
     }
     /// `BiomeSource.getNoiseBiome` at quart positions, for places that may not
     /// be generated yet (`MapItem.renderBiomePreviewMap`).
     pub fn noise_biomes(&self, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
+        let mut worker = horizon_core::sync::lock(&self.query);
         let worker = worker.get_or_insert_with(|| self.generator.worker());
         worker.noise_biomes(quarts)
     }
@@ -380,7 +380,7 @@ impl VanillaTerrain {
         &self,
         query: &horizon_world::worldgen::generator::JigsawQuery<'_>,
     ) -> Option<horizon_world::worldgen::generator::JigsawPieces> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
+        let mut worker = horizon_core::sync::lock(&self.query);
         let worker = worker.get_or_insert_with(|| self.generator.worker());
         worker.jigsaw_pieces(query)
     }
@@ -391,7 +391,7 @@ impl VanillaTerrain {
     /// Concentric ring positions of a structure set (strongholds), searched
     /// for now if no chunk needed them yet.
     pub fn ring_positions(&self, set: &str) -> Option<Vec<ChunkPos>> {
-        let mut worker = self.query.lock().unwrap_or_else(|e| e.into_inner());
+        let mut worker = horizon_core::sync::lock(&self.query);
         let worker = worker.get_or_insert_with(|| self.generator.worker());
         worker.ring_positions(set)
     }
@@ -420,7 +420,7 @@ impl VanillaTerrain {
             .spawn(move || {
                 horizon_threads::idle_current();
                 loop {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    horizon_core::sync::sleep(std::time::Duration::from_millis(500));
                     // The world closed: nothing to search for.
                     let Some(terrain) = terrain.upgrade() else {
                         return;
@@ -456,9 +456,7 @@ const SHARED_WITH_PACKS: usize = 2;
 /// Let go of the bundles `shared_data` loaded: for a preload no world used
 /// (game/world_loading.rs). A generator that holds one keeps it.
 pub fn forget_shared_data() {
-    SHARED_DATA
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    horizon_core::sync::lock(&SHARED_DATA)
         .clear();
 }
 /// The worldgen bundle at `dir`, loaded once and shared by every generator
@@ -476,7 +474,7 @@ pub fn shared_data_with(
     overrides: &WorldgenOverrides,
     registry: &'static BlockRegistry,
 ) -> crate::Result<Arc<GeneratorData>> {
-    let mut cache = SHARED_DATA.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = horizon_core::sync::lock(&SHARED_DATA);
     if let Some((_, _, data)) = cache
         .iter()
         .find(|(path, o, _)| path == dir && o == overrides)

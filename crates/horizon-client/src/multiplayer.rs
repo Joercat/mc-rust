@@ -169,14 +169,14 @@ fn favicon_bytes(json: &serde_json::Value) -> Option<Vec<u8>> {
 fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) {
     for s in servers {
         let address = s.ip.clone();
-        pings.lock().unwrap().insert(address.clone(), Ping::Pinging);
+        horizon_core::sync::lock(&pings).insert(address.clone(), Ping::Pinging);
         let saved = s.icon.clone();
         if let Some(pixels) = saved
             .as_deref()
             .and_then(crate::skins::base64_decode)
             .and_then(|png| icon_pixels(&png))
         {
-            icons.lock().unwrap().insert(address.clone(), pixels);
+            horizon_core::sync::lock(&icons).insert(address.clone(), pixels);
         }
         let (pings, icons, file) = (pings.clone(), icons.clone(), file.to_owned());
         let _ = std::thread::Builder::new()
@@ -203,8 +203,8 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
                             let encoded = crate::lan::base64(&png);
                             let pixels = icon_pixels(&png);
                             match &pixels {
-                                Some(p) => icons.lock().unwrap().insert(address.clone(), p.clone()),
-                                None => icons.lock().unwrap().remove(&address),
+                                Some(p) => horizon_core::sync::lock(&icons).insert(address.clone(), p.clone()),
+                                None => horizon_core::sync::lock(&icons).remove(&address),
                             };
                             let icon = pixels.map(|_| encoded);
                             if icon != saved {
@@ -221,7 +221,7 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
                     }
                     Err(e) => Ping::Failed(e),
                 };
-                pings.lock().unwrap().insert(address, result);
+                horizon_core::sync::lock(&pings).insert(address, result);
             });
     }
 }
@@ -486,7 +486,7 @@ impl Screen {
             bottom,
             content_height(servers.len(), lan.games().len()),
         );
-        let pings = pings.lock().unwrap();
+        let pings = horizon_core::sync::lock(&pings);
         let lines = match ping_tooltip(servers, &pings, size, scroll.amount, cursor) {
             Some(text) => vec![text],
             None => player_list_tooltip(servers, &pings, size, scroll.amount, cursor, |t| {
@@ -777,8 +777,8 @@ impl Screen {
                 // the rows clipped to the list, separators, scrollbar.
                 crate::ui::list_background(batch, atlas, top, bottom, false);
                 let first = batch.vertices.len();
-                let pings = pings.lock().unwrap();
-                let icons = icons.lock().unwrap();
+                let pings = horizon_core::sync::lock(&pings);
+                let icons = horizon_core::sync::lock(&icons);
                 // The row under the pointer (`isHovered`).
                 let hovered = row_at(servers.len(), games.len(), cursor, (w, h), scroll.amount);
                 let millis = horizon_core::time::SystemTime::now()

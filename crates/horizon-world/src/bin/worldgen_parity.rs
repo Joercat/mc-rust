@@ -410,13 +410,11 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
     }
     impl Traced {
         fn enter(&self, event: String) -> Result<(), SampleError> {
-            self.events.lock().unwrap().push(event);
-            let mut calls = self.calls.lock().unwrap();
+            horizon_core::sync::lock(&self.events).push(event);
+            let mut calls = horizon_core::sync::lock(&self.calls);
             *calls += 1;
             if self.fail == Some(*calls) {
-                self.events
-                    .lock()
-                    .unwrap()
+                horizon_core::sync::lock(&self.events)
                     .push(format!("sample failure {}", self.field));
                 Err(SampleError::ZeroGradientPeriod)
             } else {
@@ -435,7 +433,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
                 self.field, position[0], position[1], position[2]
             ))?;
             let result = self.sampler.sample_value(context, position);
-            self.events.lock().unwrap().push(match result {
+            horizon_core::sync::lock(&self.events).push(match result {
                 Ok(value) => format!("value {}", bits(value)),
                 Err(_) => "value error".into(),
             });
@@ -464,7 +462,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
                 steps[2]
             ))?;
             let result = self.sampler.sample_volume(context, buffer, volume);
-            let mut events = self.events.lock().unwrap();
+            let mut events = horizon_core::sync::lock(&self.events);
             events.push(format!(
                 "sample volume {}",
                 if result.is_ok() { "ok" } else { "error" }
@@ -485,7 +483,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
     impl FluidPicker for Picker {
         fn compute(&self, position: [i32; 3]) -> FluidStatus {
             let status = self.inner.compute(position);
-            self.events.lock().unwrap().push(format!(
+            horizon_core::sync::lock(&self.events).push(format!(
                 "pick {} {} {} {} {}",
                 position[0], position[1], position[2], status.level, status.state.0
             ));
@@ -511,7 +509,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
         }
     }
     fn flush(events: &Mutex<Vec<String>>, out: &mut impl Write) -> io::Result<()> {
-        for event in events.lock().unwrap().drain(..) {
+        for event in horizon_core::sync::lock(&events).drain(..) {
             writeln!(out, "{event}")?;
         }
         Ok(())

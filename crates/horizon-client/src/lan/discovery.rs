@@ -86,7 +86,7 @@ impl Pinger {
                     let _ = socket.send_to(message.as_bytes(), target);
                     let mut slept = Duration::ZERO;
                     while slept < INTERVAL && !flag.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(50));
+                        horizon_core::sync::sleep(Duration::from_millis(50));
                         slept += Duration::from_millis(50);
                     }
                 }
@@ -147,7 +147,7 @@ impl Scanner {
     /// The worlds announced since the scan started, in order (vanilla's
     /// list keeps them while the multiplayer screen is open).
     pub fn games(&self) -> Vec<LanGame> {
-        self.inner.games.lock().unwrap().clone()
+        horizon_core::sync::lock(&self.inner.games).clone()
     }
 }
 fn bind_listener() -> io::Result<UdpSocket> {
@@ -163,7 +163,7 @@ fn listen(socket: UdpSocket, games: Games, stop: Arc<AtomicBool>) {
             continue;
         };
         let text = String::from_utf8_lossy(&buf[..n]);
-        add_server(&mut games.lock().unwrap(), &text, &from.ip().to_string());
+        add_server(&mut horizon_core::sync::lock(&games), &text, &from.ip().to_string());
     }
 }
 

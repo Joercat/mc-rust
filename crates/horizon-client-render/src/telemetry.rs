@@ -75,12 +75,12 @@ fn readiness_ms(mark: &AtomicU32) -> Option<u32> {
 }
 
 pub fn set_gpu(gpu: Gpu) {
-    *GPU.lock().unwrap_or_else(|e| e.into_inner()) = Some(gpu);
+    *horizon_core::sync::lock(&GPU) = Some(gpu);
 }
 
 /// The screen the window is on: size in physical pixels, refresh rate, scale.
 pub fn set_display(width: u32, height: u32, refresh_hz: u32, scale: f64) {
-    *DISPLAY.lock().unwrap_or_else(|e| e.into_inner()) = Some(Display {
+    *horizon_core::sync::lock(&DISPLAY) = Some(Display {
         width,
         height,
         refresh_hz,
@@ -129,7 +129,7 @@ pub fn gpu_kind(device_type: &str) -> &'static str {
 pub fn system() -> System {
     let home = horizon_core::vfs::current_dir().ok();
     let mut system = System::detect_in(home.as_deref());
-    if let Some(gpu) = GPU.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+    if let Some(gpu) = horizon_core::sync::lock(&GPU).clone() {
         system.vram_mb = match gpu.kind.as_str() {
             "discrete" => horizon_telemetry::system::vram_mb(&gpu.vendor).unwrap_or(0),
             _ => 0,
@@ -140,7 +140,7 @@ pub fn system() -> System {
         system.driver = gpu.driver;
         system.backend = gpu.backend;
     }
-    system.display = DISPLAY.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    system.display = horizon_core::sync::lock(&DISPLAY).clone();
     system
 }
 

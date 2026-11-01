@@ -244,7 +244,7 @@ impl Game<'_> {
                 if millis > 5000 {
                     return Err("stall is limited to 5000 milliseconds".into());
                 }
-                std::thread::sleep(Duration::from_millis(millis));
+                horizon_core::sync::sleep(Duration::from_millis(millis));
                 ok()
             }
             "simulation" => {

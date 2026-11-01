@@ -16,7 +16,7 @@ struct Channel {
 }
 impl Channel {
     fn close(&self) {
-        self.state.lock().unwrap().1 = true;
+        horizon_core::sync::lock(&self.state).1 = true;
         self.ready.notify_all();
     }
 }
@@ -51,7 +51,7 @@ impl Pipe {
     fn try_clone(&self) -> Self {
         Self {
             end: self.end.clone(),
-            timeout: Mutex::new(*self.timeout.lock().unwrap()),
+            timeout: Mutex::new(*horizon_core::sync::lock(&self.timeout)),
         }
     }
     /// Close both directions: reads at either end then see the end of the stream.
@@ -62,8 +62,8 @@ impl Pipe {
 }
 impl Read for Pipe {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        let deadline = self.timeout.lock().unwrap().map(|t| Instant::now() + t);
-        let mut state = self.end.incoming.state.lock().unwrap();
+        let deadline = horizon_core::sync::lock(&self.timeout).map(|t| Instant::now() + t);
+        let mut state = horizon_core::sync::lock(&self.end.incoming.state);
         while state.0.is_empty() && !state.1 {
             state = match deadline {
                 None => self.end.incoming.ready.wait(state).unwrap(),
@@ -85,7 +85,7 @@ impl Read for Pipe {
 }
 impl Write for Pipe {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let mut state = self.end.outgoing.state.lock().unwrap();
+        let mut state = horizon_core::sync::lock(&self.end.outgoing.state);
         if state.1 {
             return Err(std::io::ErrorKind::BrokenPipe.into());
         }
@@ -114,7 +114,7 @@ impl Stream {
         match self {
             Self::Tcp(s) => s.set_read_timeout(timeout),
             Self::Memory(p) => {
-                *p.timeout.lock().unwrap() = timeout;
+                *horizon_core::sync::lock(&p.timeout) = timeout;
                 Ok(())
             }
         }

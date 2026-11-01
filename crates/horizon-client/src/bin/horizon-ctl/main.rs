@@ -170,7 +170,7 @@ impl Session {
         };
         match name {
             "sleep" => {
-                thread::sleep(Duration::from_secs_f64(number(1, "SECONDS")?.max(0.0)));
+                horizon_core::sync::sleep(Duration::from_secs_f64(number(1, "SECONDS")?.max(0.0)));
                 Ok(json!({ "ok": true }))
             }
             "launch" => {
@@ -209,7 +209,7 @@ impl Session {
                     _ => return Err(Failure::usage(format!("usage: {}", usage(name)))),
                 };
                 self.game(&format!("key {key} down"))?;
-                thread::sleep(Duration::from_secs_f64(seconds.max(0.0)));
+                horizon_core::sync::sleep(Duration::from_secs_f64(seconds.max(0.0)));
                 self.game(&format!("key {key} up"))
             }
             "logs" => logs(&self.home, &words[1..]),
@@ -258,7 +258,7 @@ impl Session {
                     status: GAME_ERROR,
                 });
             }
-            thread::sleep(Duration::from_millis(250));
+            horizon_core::sync::sleep(Duration::from_millis(250));
         }
     }
 }

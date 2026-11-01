@@ -2457,7 +2457,7 @@ mod tests {
         // Signs out of view for a while are dropped.
         scene.game_time = 2 * SIGN_TEXT_KEEP;
         check(&scene, pos, 0);
-        assert_eq!(renderer.sign_texts.lock().unwrap().signs.len(), 1);
+        assert_eq!(horizon_core::sync::lock(&renderer.sign_texts).signs.len(), 1);
     }
     #[test]
     fn first_line_wraps_on_bytes_without_splitting_a_char() {

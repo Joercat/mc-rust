@@ -354,7 +354,7 @@ impl StructureResources {
         } else {
             format!("minecraft:{id}")
         };
-        if let Some(found) = self.templates.read().unwrap().get(&id) {
+        if let Some(found) = horizon_core::sync::read(&self.templates).get(&id) {
             return found.clone();
         }
         let (namespace, path) = id.split_once(':').unwrap();
@@ -375,7 +375,7 @@ impl StructureResources {
         let mut loaded = loaded.unwrap_or_else(StructureTemplate::empty);
         loaded.location = id.as_str().into();
         let loaded = Some(Arc::new(loaded));
-        self.templates.write().unwrap().insert(id, loaded.clone());
+        horizon_core::sync::write(&self.templates).insert(id, loaded.clone());
         loaded
     }
     /// Whether the state's fluid is a source (water/lava level 0, waterlogged).

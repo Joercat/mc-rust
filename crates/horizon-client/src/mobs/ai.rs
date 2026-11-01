@@ -2238,7 +2238,7 @@ pub fn step_sound(
 pub fn intern_sound(s: &std::sync::Arc<str>) -> &'static str {
     use std::{collections::HashSet, sync::Mutex};
     static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
-    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut names = horizon_core::sync::lock(&NAMES);
     let set = names.get_or_insert_with(HashSet::new);
     let key = s.strip_prefix("minecraft:").unwrap_or(s);
     if let Some(found) = set.get(key) {

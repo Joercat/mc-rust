@@ -47,7 +47,7 @@ impl<T: Copy> PoiSections<T> {
         section: &Arc<Section>,
         mut kind: impl FnMut(u32) -> Option<T>,
     ) -> SectionPois<T> {
-        let mut lists = self.sections.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lists = horizon_core::sync::lock(&self.sections);
         if let Some(cached) = lists.by_section.get(&key)
             && cached.section.as_ptr() == Arc::as_ptr(section)
         {
@@ -152,7 +152,7 @@ mod tests {
         for i in 0..MIN_PRUNE as i32 {
             index.get((1, i, 0), &Arc::new(Section::default()), kind);
         }
-        let lists = index.sections.lock().unwrap();
+        let lists = horizon_core::sync::lock(&index.sections);
         assert!(lists.by_section.len() <= 2);
         assert!(lists.by_section.contains_key(&(0, 0, 0)));
     }

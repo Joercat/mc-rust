@@ -26,7 +26,7 @@ impl LegacyPiece for BuriedTreasurePiece {
         BoundingBox::new(self.position, self.position)
     }
     fn save(&self) -> Option<crate::nbt::Compound> {
-        let at = self.found.lock().unwrap().unwrap_or(self.position);
+        let at = horizon_core::sync::lock(&self.found).unwrap_or(self.position);
         Some(super::legacy::piece_tag(
             "minecraft:btp",
             BoundingBox::new(at, at),
@@ -69,7 +69,7 @@ impl LegacyPiece for BuriedTreasurePiece {
                         }
                     }
                 }
-                *self.found.lock().unwrap() = Some(pos);
+                *horizon_core::sync::lock(&self.found) = Some(pos);
                 create_chest(c, pos, "minecraft:chests/buried_treasure", None)?;
                 return Ok(());
             }
@@ -214,7 +214,7 @@ impl TemplatePiece {
         let adjusted = match self.handler {
             TemplateHandler::Shipwreck { .. }
             | TemplateHandler::OceanRuin { .. }
-            | TemplateHandler::Igloo => *self.state.lock().unwrap(),
+            | TemplateHandler::Igloo => *horizon_core::sync::lock(&self.state),
             _ => None,
         };
         let dy = adjusted.map_or(0, |y| y - self.position[1]);
@@ -322,7 +322,7 @@ impl LegacyPiece for TemplatePiece {
                     self.position[2],
                 ];
                 // The box stays moved; templatePosition goes back after placing.
-                *self.state.lock().unwrap() = Some(position[1]);
+                *horizon_core::sync::lock(&self.state) = Some(position[1]);
                 if let Some(markers) = self.place_at(c, position, &[])? {
                     for (marker, pos) in markers {
                         if marker == "chest" {
@@ -353,7 +353,7 @@ impl LegacyPiece for TemplatePiece {
                 }
             }
             TemplateHandler::Shipwreck { beached } => {
-                let adjusted = *self.state.lock().unwrap();
+                let adjusted = *horizon_core::sync::lock(&self.state);
                 let y = match adjusted {
                     Some(y) => y,
                     None if shipwreck_too_big(&self.template) => self.position[1],
@@ -384,7 +384,7 @@ impl LegacyPiece for TemplatePiece {
                         } else {
                             mean
                         };
-                        *self.state.lock().unwrap() = Some(y);
+                        *horizon_core::sync::lock(&self.state) = Some(y);
                         y
                     }
                 };
@@ -451,7 +451,7 @@ impl Scattered {
         }
     }
     pub fn frame(&self) -> PieceFrame {
-        *self.frame.lock().unwrap()
+        *horizon_core::sync::lock(&self.frame)
     }
     /// `ScatteredFeaturePiece`'s tag: the box and the height it settled on.
     pub fn saved(&self, id: &str) -> crate::nbt::Compound {
@@ -462,7 +462,7 @@ impl Scattered {
             ("Width", self.width),
             ("Height", self.height),
             ("Depth", self.depth),
-            ("HPos", *self.height_position.lock().unwrap()),
+            ("HPos", *horizon_core::sync::lock(&self.height_position)),
         ] {
             tag.insert(key.into(), Tag::Int(value));
         }
@@ -470,7 +470,7 @@ impl Scattered {
     }
     /// updateAverageGroundHeight over the part of the box inside the chunk.
     pub fn average_ground(&self, c: &mut PieceContext<'_>, offset: i32) -> Result<bool> {
-        if *self.height_position.lock().unwrap() >= 0 {
+        if *horizon_core::sync::lock(&self.height_position) >= 0 {
             return Ok(true);
         }
         let b = self.frame().bounding_box;
@@ -489,8 +489,8 @@ impl Scattered {
             return Ok(false);
         }
         let h = total / count;
-        *self.height_position.lock().unwrap() = h;
-        let mut frame = self.frame.lock().unwrap();
+        *horizon_core::sync::lock(&self.height_position) = h;
+        let mut frame = horizon_core::sync::lock(&self.frame);
         frame.bounding_box =
             frame
                 .bounding_box
@@ -499,7 +499,7 @@ impl Scattered {
     }
     /// updateHeightPositionToLowestGroundHeight over the whole box.
     pub fn lowest_ground(&self, c: &mut PieceContext<'_>, offset: i32) -> Result<bool> {
-        if *self.height_position.lock().unwrap() >= 0 {
+        if *horizon_core::sync::lock(&self.height_position) >= 0 {
             return Ok(true);
         }
         let b = self.frame().bounding_box;
@@ -512,8 +512,8 @@ impl Scattered {
                 );
             }
         }
-        *self.height_position.lock().unwrap() = lowest;
-        let mut frame = self.frame.lock().unwrap();
+        *horizon_core::sync::lock(&self.height_position) = lowest;
+        let mut frame = horizon_core::sync::lock(&self.frame);
         frame.bounding_box =
             frame
                 .bounding_box
@@ -543,7 +543,7 @@ impl LegacyPiece for SwampHutPiece {
     }
     fn save(&self) -> Option<crate::nbt::Compound> {
         let mut tag = self.base.saved("minecraft:tesh");
-        let spawned = crate::nbt::Tag::Byte(i8::from(*self.spawned.lock().unwrap()));
+        let spawned = crate::nbt::Tag::Byte(i8::from(*horizon_core::sync::lock(&self.spawned)));
         tag.insert("Witch".into(), spawned.clone());
         tag.insert("Cat".into(), spawned);
         Some(tag)
@@ -616,7 +616,7 @@ impl LegacyPiece for SwampHutPiece {
                 c.world
                     .entity(super::legacy::spawn_nbt(id, pos, true, true))?;
             }
-            *self.spawned.lock().unwrap() = true;
+            *horizon_core::sync::lock(&self.spawned) = true;
         }
         Ok(())
     }

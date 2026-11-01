@@ -2447,7 +2447,7 @@ impl Drop for SaveDir {
         if let Some(writer) = self.writer.get_mut().ok().and_then(Option::take) {
             drop(writer.send);
             #[cfg(not(target_arch = "wasm32"))]
-            let _ = writer.thread.join();
+            let _ = horizon_core::sync::join(writer.thread);
         }
     }
 }
@@ -4620,7 +4620,7 @@ mod tests {
         );
         assert!(surfaces[15].surface.is_none(), "saved void stays empty");
         assert!(
-            reopened.regions.lock().unwrap().is_empty(),
+            horizon_core::sync::lock(&reopened.regions).is_empty(),
             "far reads do not grow gameplay region cache"
         );
         let mut proto = encode(&chunk, assets.registry, &biomes);
@@ -4862,7 +4862,7 @@ mod tests {
             .unwrap()
             .unwrap();
         // Hold the actual region lock, rather than relying on disk speed or sleeps.
-        let blocked = region.lock().unwrap();
+        let blocked = horizon_core::sync::lock(&region);
         let entity = |version| Tag::compound([("version", Tag::Int(version))]);
         save.save_entities_later(vec![((1, 2), vec![entity(1)])])
             .unwrap();

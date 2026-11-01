@@ -307,7 +307,7 @@ impl Game<'_> {
             while self.integrated_starting.is_some() {
                 self.poll_integrated_start()?;
                 if self.integrated_starting.is_some() {
-                    std::thread::sleep(Duration::from_millis(5));
+                    horizon_core::sync::sleep(Duration::from_millis(5));
                 }
             }
         }
@@ -514,7 +514,7 @@ impl Game<'_> {
             }
             self.lan = Some(host);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        horizon_core::sync::sleep(Duration::from_millis(100));
         // ServerPlayer.disconnect: nobody is left in a bed.
         self.free_player_beds()?;
         self.save_game()?;

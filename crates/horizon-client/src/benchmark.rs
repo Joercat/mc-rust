@@ -207,7 +207,7 @@ fn run(control: &Control, setup: Setup) -> Result<PathBuf, String> {
                 &[chunks / load.as_secs_f64()],
             );
         }
-        thread::sleep(SETTLE);
+        horizon_core::sync::sleep(SETTLE);
         let [ex, ey, ez] = end;
         let begin = Instant::now();
         let flight = control.call(&format!(
@@ -311,7 +311,7 @@ fn poll(
         if ready(&status) {
             return Ok(status);
         }
-        thread::sleep(Duration::from_millis(50));
+        horizon_core::sync::sleep(Duration::from_millis(50));
     }
     Err(format!("not ready after {} s", limit.as_secs()))
 }
@@ -357,7 +357,7 @@ fn wait_loaded(control: &Control, near: impl Fn(&Value) -> bool) -> Result<Insta
                     && now - began > Duration::from_secs(5));
             if min_chunks > 0 && (!moved || resident < min_chunks) {
                 (last, changed, previous, meshing) = (None, now, None, now);
-                thread::sleep(Duration::from_millis(50));
+                horizon_core::sync::sleep(Duration::from_millis(50));
                 continue;
             }
             if last != Some(counts) {
@@ -386,7 +386,7 @@ fn wait_loaded(control: &Control, near: impl Fn(&Value) -> bool) -> Result<Insta
                 return Ok(changed.max(meshing));
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        horizon_core::sync::sleep(Duration::from_millis(50));
     }
     Err(format!("not loaded after {} s", LOAD_LIMIT.as_secs()))
 }

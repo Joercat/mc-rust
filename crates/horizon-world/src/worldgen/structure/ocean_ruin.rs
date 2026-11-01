@@ -326,7 +326,7 @@ pub fn post_process(piece: &TemplatePiece, c: &mut PieceContext<'_>) -> Result<(
     }
     position[1] = new_y;
     // OceanRuinPiece.postProcess keeps the height in templatePosition.
-    *piece.state.lock().unwrap() = Some(new_y);
+    *horizon_core::sync::lock(&piece.state) = Some(new_y);
     if let Some(markers) = piece.place_at(c, position, &[])? {
         for (marker, pos) in markers {
             if marker == "chest" {

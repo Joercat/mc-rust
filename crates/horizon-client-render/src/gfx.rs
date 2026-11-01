@@ -5694,8 +5694,10 @@ impl Renderer {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| e.to_string())?;
+        // `poll(wait_indefinitely)` above ran the map callback: the result is
+        // already in the channel, and the frame must not block for it.
         receiver
-            .recv()
+            .try_recv()
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         let (width, height, row) = (

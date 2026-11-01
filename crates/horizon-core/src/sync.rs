@@ -52,8 +52,57 @@ pub fn set_may_block(may: bool) {
     imp::set_may_block(may);
 }
 
+/// A mutex, or an `Arc` around one: what [`lock`] accepts.
+pub trait MutexLike {
+    type Item: ?Sized;
+    fn mutex(&self) -> &Mutex<Self::Item>;
+}
+impl<T: ?Sized> MutexLike for Mutex<T> {
+    type Item = T;
+    fn mutex(&self) -> &Mutex<T> {
+        self
+    }
+}
+impl<T: ?Sized> MutexLike for std::sync::Arc<Mutex<T>> {
+    type Item = T;
+    fn mutex(&self) -> &Mutex<T> {
+        self
+    }
+}
+impl<T: MutexLike + ?Sized> MutexLike for &T {
+    type Item = T::Item;
+    fn mutex(&self) -> &Mutex<Self::Item> {
+        (**self).mutex()
+    }
+}
+
+/// A lock, or an `Arc` around one: what [`read`] and [`write`] accept.
+pub trait RwLockLike {
+    type Item: ?Sized;
+    fn lock_ref(&self) -> &RwLock<Self::Item>;
+}
+impl<T: ?Sized> RwLockLike for RwLock<T> {
+    type Item = T;
+    fn lock_ref(&self) -> &RwLock<T> {
+        self
+    }
+}
+impl<T: ?Sized> RwLockLike for std::sync::Arc<RwLock<T>> {
+    type Item = T;
+    fn lock_ref(&self) -> &RwLock<T> {
+        self
+    }
+}
+impl<T: RwLockLike + ?Sized> RwLockLike for &T {
+    type Item = T::Item;
+    fn lock_ref(&self) -> &RwLock<Self::Item> {
+        (**self).lock_ref()
+    }
+}
+
 /// `Mutex::lock`, spinning where the caller may not park.
-pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<M: MutexLike + ?Sized>(m: &M) -> MutexGuard<'_, M::Item> {
+    let m = m.mutex();
     if imp::may_block() {
         return m.lock().unwrap_or_else(|e| e.into_inner());
     }
@@ -66,7 +115,8 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// `RwLock::read`, spinning where the caller may not park.
-pub fn read<T>(m: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+pub fn read<L: RwLockLike + ?Sized>(m: &L) -> RwLockReadGuard<'_, L::Item> {
+    let m = m.lock_ref();
     if imp::may_block() {
         return m.read().unwrap_or_else(|e| e.into_inner());
     }
@@ -79,7 +129,8 @@ pub fn read<T>(m: &RwLock<T>) -> RwLockReadGuard<'_, T> {
 }
 
 /// `RwLock::write`, spinning where the caller may not park.
-pub fn write<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+pub fn write<L: RwLockLike + ?Sized>(m: &L) -> RwLockWriteGuard<'_, L::Item> {
+    let m = m.lock_ref();
     if imp::may_block() {
         return m.write().unwrap_or_else(|e| e.into_inner());
     }

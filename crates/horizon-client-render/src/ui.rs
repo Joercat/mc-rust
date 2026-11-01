@@ -80,13 +80,11 @@ pub fn load_metadata(root: &Path) {
             map.insert(key, nine_slice);
         }
     }
-    *NINE_SLICE.write().unwrap_or_else(|e| e.into_inner()) = Some(map);
+    *horizon_core::sync::write(&NINE_SLICE) = Some(map);
 }
 /// The sprite's nine-slice metadata, when its `.png.mcmeta` has any.
 fn nine_slice_metadata(sprite: &str) -> Option<NineSlice> {
-    NINE_SLICE
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
+    horizon_core::sync::read(&NINE_SLICE)
         .as_ref()
         .and_then(|m| m.get(sprite).copied())
 }

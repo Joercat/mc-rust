@@ -1248,7 +1248,7 @@ impl Game<'_> {
         }
         host.hub.disconnect_all();
         // Give the writer threads a moment to flush the disconnect packets.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        horizon_core::sync::sleep(std::time::Duration::from_millis(100));
         self.world.block_log = None;
         self.world.light_log = None;
         self.audio.capture = None;

@@ -420,7 +420,7 @@ impl Game<'_> {
             self.pump_chunks(*next, paused);
             let now = Instant::now();
             if *next > now {
-                std::thread::sleep(*next - now);
+                horizon_core::sync::sleep(*next - now);
             }
         } else if now - *next > Duration::from_secs(2) {
             *next = now;

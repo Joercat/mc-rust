@@ -464,7 +464,7 @@ fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation()
             _: &mut SamplerContext,
             position: [i32; 3],
         ) -> Result<f32, SampleError> {
-            self.points.lock().unwrap().push(position);
+            horizon_core::sync::lock(&self.points).push(position);
             Ok(-0.0)
         }
         fn sample_volume(
@@ -473,7 +473,7 @@ fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation()
             buffer: &mut [f32],
             volume: DensityVolume,
         ) -> Result<(), SampleError> {
-            self.volumes.lock().unwrap().push(volume);
+            horizon_core::sync::lock(&self.volumes).push(volume);
             buffer.fill(-0.0);
             Ok(())
         }
@@ -489,9 +489,9 @@ fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation()
         (-0.0_f32).to_bits()
     );
     sampler.sample_value(&mut context, [-1, -1, -1]).unwrap();
-    assert_eq!(*traced.points.lock().unwrap(), [[-4, -8, 4]]);
+    assert_eq!(*horizon_core::sync::lock(&traced.points), [[-4, -8, 4]]);
     assert_eq!(
-        *traced.volumes.lock().unwrap(),
+        *horizon_core::sync::lock(&traced.volumes),
         [DensityVolume::new([2; 3], [-4, -8, -4], [4, 8, 4]).unwrap()]
     );
     let volume = DensityVolume::new([2, 1, 2], [-4, -8, 4], [4, 1, 4]).unwrap();
@@ -500,14 +500,14 @@ fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation()
         .sample_volume(&mut context, &mut output, volume)
         .unwrap();
     assert!(output.iter().all(|v| v.to_bits() == (-0.0_f32).to_bits()));
-    assert_eq!(traced.volumes.lock().unwrap()[1], volume);
+    assert_eq!(horizon_core::sync::lock(&traced.volumes)[1], volume);
     let distant = DensityVolume::new([16, 49, 16], [-8192, -64, -8192], [1024, 8, 1024]).unwrap();
     let mut output = vec![19.; distant.size()];
     sampler
         .sample_volume(&mut SamplerContext::sparse(), &mut output, distant)
         .unwrap();
     assert_eq!(
-        traced.volumes.lock().unwrap()[2],
+        horizon_core::sync::lock(&traced.volumes)[2],
         distant,
         "far samples must not expand to a block-resolution bounding box"
     );
@@ -518,7 +518,7 @@ fn grid_interpolation_uses_child_bulk_corners_and_preserves_aligned_delegation()
         .unwrap();
     assert!(output.iter().all(|&v| v == 0.));
     assert!(
-        traced.volumes.lock().unwrap()[3..]
+        horizon_core::sync::lock(&traced.volumes)[3..]
             .iter()
             .all(|v| v.size() == 8),
         "unaligned far points use bounded corner queries"
@@ -907,7 +907,7 @@ fn binary_bulk_preserves_child_failure_order_and_output() {
             buffer: &mut [f32],
             _: DensityVolume,
         ) -> Result<(), SampleError> {
-            self.calls.lock().unwrap().push(self.name);
+            horizon_core::sync::lock(&self.calls).push(self.name);
             buffer.fill(self.value);
             if self.fail {
                 Err(SampleError::ZeroGradientPeriod)
@@ -942,7 +942,7 @@ fn binary_bulk_preserves_child_failure_order_and_output() {
                 .is_err()
         );
         assert_eq!(wrong_size, [17.0; 2]);
-        assert!(calls.lock().unwrap().is_empty());
+        assert!(horizon_core::sync::lock(&calls).is_empty());
         let mut output = [17.0];
         assert_eq!(
             sampler.sample_volume(&mut context, &mut output, volume),
@@ -950,7 +950,7 @@ fn binary_bulk_preserves_child_failure_order_and_output() {
         );
         assert_eq!(output, [3.0]);
         assert_eq!(
-            *calls.lock().unwrap(),
+            *horizon_core::sync::lock(&calls),
             if left_fails {
                 vec!["left"]
             } else {

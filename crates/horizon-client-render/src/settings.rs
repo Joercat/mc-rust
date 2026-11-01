@@ -12,7 +12,7 @@ pub use horizon_client_core::sound_source::SOUND_SOURCES;
 /// Per-source volumes for the mixer (soundCategory_* except master).
 static SOURCE_VOLUMES: std::sync::RwLock<[f32; 11]> = std::sync::RwLock::new([1.0; 11]);
 pub fn set_source_volumes(volumes: [f32; 11]) {
-    *SOURCE_VOLUMES.write().unwrap_or_else(|e| e.into_inner()) = volumes;
+    *horizon_core::sync::write(&SOURCE_VOLUMES) = volumes;
 }
 /// The SoundSource an event plays on. Vanilla callers pick the source; this
 /// follows their conventions by event family.
@@ -84,7 +84,7 @@ pub fn source_volume(i: usize) -> f32 {
     if i == 0 {
         1.0
     } else {
-        SOURCE_VOLUMES.read().unwrap_or_else(|e| e.into_inner())[i]
+        horizon_core::sync::read(&SOURCE_VOLUMES)[i]
     }
 }
 

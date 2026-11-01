@@ -787,7 +787,7 @@ impl Audio {
         self.stop_all();
         self.engine.registry = SoundRegistry::load(root);
         self.backend.root = root.to_owned();
-        let mut cache = self.backend.cache.lock().unwrap();
+        let mut cache = horizon_core::sync::lock(&self.backend.cache);
         cache.entries.clear();
         cache.bytes = 0;
     }
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(audio.random.next_long(), random.next_long());
         audio.pause();
         assert_eq!(
-            audio.backend.mixer.lock().unwrap().channels[&1].state,
+            horizon_core::sync::lock(&audio.backend.mixer).channels[&1].state,
             State::Initial
         );
         audio.stop_all();

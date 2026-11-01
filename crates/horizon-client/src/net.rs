@@ -204,7 +204,7 @@ impl Session {
                 );
                 let from_server = result.is_ok();
                 let reason = result.unwrap_or_else(|e| e);
-                if let Some(w) = thread_writer.lock().unwrap().take() {
+                if let Some(w) = horizon_core::sync::lock(&thread_writer).take() {
                     w.shutdown();
                 }
                 let _ = send.send(Event::Disconnected {
@@ -247,7 +247,7 @@ impl Session {
         {
             eprintln!("[net] -> {packet:?}");
         }
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = horizon_core::sync::lock(&self.writer);
         if self.configuring.load(Ordering::Relaxed) {
             return;
         }
@@ -260,7 +260,7 @@ impl Session {
     /// ServerboundResourcePackPacket, in whichever phase the connection is.
     pub fn send_pack_status(&self, id: u128, action: i32) {
         let status = cfg::ResourcePackResponse { id, action };
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = horizon_core::sync::lock(&self.writer);
         let body = if self.configuring.load(Ordering::Relaxed) {
             cfg::Serverbound::ResourcePack(status).encode()
         } else {
@@ -279,7 +279,7 @@ impl Session {
             id: id.to_owned(),
             payload,
         };
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = horizon_core::sync::lock(&self.writer);
         let body = if self.configuring.load(Ordering::Relaxed) {
             cfg::Serverbound::CustomClickAction(click).encode()
         } else {
@@ -293,7 +293,7 @@ impl Session {
     }
     /// ServerboundAcceptCodeOfConductPacket, sent in configuration.
     pub fn accept_code_of_conduct(&self) {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = horizon_core::sync::lock(&self.writer);
         if let Some(w) = writer.as_mut()
             && w.send(&cfg::Serverbound::AcceptCodeOfConduct(Empty).encode())
                 .is_err()
@@ -306,7 +306,7 @@ impl Session {
     /// doesn't wake a read already waiting, so joining it held the window until
     /// the server dropped the connection, many seconds later.
     pub fn disconnect(&mut self) {
-        if let Some(w) = self.writer.lock().unwrap().take() {
+        if let Some(w) = horizon_core::sync::lock(&self.writer).take() {
             w.shutdown();
         }
         drop(self.thread.take());
@@ -431,7 +431,7 @@ fn run(
         .map_err(|e| e.to_string())?;
         (host, port, c)
     };
-    *shared_counters.lock().unwrap() = Some(c.reader.counters.clone());
+    *horizon_core::sync::lock(&shared_counters) = Some(c.reader.counters.clone());
     let e = |e: horizon_protocol::Error| e.to_string();
     c.send(
         &handshake::Serverbound::Intention(handshake::Intention {
@@ -515,7 +515,7 @@ fn run(
             // ClientHandshakePacketListenerImpl.handleRequestCookie: the
             // cookies a transfer carried over (none on a plain join).
             login::Clientbound::CookieRequest(q) => {
-                let payload = cookies.lock().unwrap().get(&q.key).cloned();
+                let payload = horizon_core::sync::lock(&cookies).get(&q.key).cloned();
                 c.send(
                     &login::Serverbound::CookieResponse(login::CookieResponse {
                         key: q.key,
@@ -542,7 +542,7 @@ fn run(
     )
     .map_err(e)?;
     let (mut reader, writer) = c.split();
-    *shared_writer.lock().unwrap() = Some(writer);
+    *horizon_core::sync::lock(&shared_writer) = Some(writer);
     let registries = configure(
         &mut reader,
         shared_writer,
@@ -593,7 +593,7 @@ fn receive_play(
             }
         };
         let reply = |p: play::Serverbound| {
-            if let Some(w) = shared_writer.lock().unwrap().as_mut() {
+            if let Some(w) = horizon_core::sync::lock(&shared_writer).as_mut() {
                 let _ = w.send(&p.encode());
             }
         };
@@ -607,7 +607,7 @@ fn receive_play(
                 let _ = send.send(Event::PackPop(p.id));
             }
             play::Clientbound::StartConfiguration(_) => {
-                if let Some(w) = shared_writer.lock().unwrap().as_mut() {
+                if let Some(w) = horizon_core::sync::lock(&shared_writer).as_mut() {
                     let _ = w.send(&play::Serverbound::ConfigurationAcknowledged(Empty).encode());
                     configuring.store(true, Ordering::Relaxed);
                 }
@@ -625,14 +625,14 @@ fn receive_play(
             // ClientCommonPacketListenerImpl.handleRequestCookie: the stored
             // cookie (or none) goes straight back.
             play::Clientbound::CookieRequest(q) => {
-                let payload = cookies.lock().unwrap().get(&q.key).cloned();
+                let payload = horizon_core::sync::lock(&cookies).get(&q.key).cloned();
                 reply(play::Serverbound::CookieResponse(cfg::CookieResponse {
                     key: q.key,
                     payload,
                 }));
             }
             play::Clientbound::StoreCookie(p) => {
-                cookies.lock().unwrap().insert(p.key, p.payload);
+                horizon_core::sync::lock(&cookies).insert(p.key, p.payload);
             }
             play::Clientbound::ServerLinks(p) => {
                 let _ = send.send(Event::ServerLinks(p.links));
@@ -672,7 +672,7 @@ fn configure(
 ) -> Result<Dynamic, String> {
     let mut registries = Dynamic::default();
     let reply = |p: cfg::Serverbound| -> Result<(), String> {
-        match writer.lock().unwrap().as_mut() {
+        match horizon_core::sync::lock(&writer).as_mut() {
             Some(w) => w.send(&p.encode()).map_err(|e| e.to_string()),
             None => Err("Disconnected".into()),
         }
@@ -717,14 +717,14 @@ fn configure(
                 let _ = send.send(Event::ClearDialog);
             }
             cfg::Clientbound::CookieRequest(q) => {
-                let payload = cookies.lock().unwrap().get(&q.key).cloned();
+                let payload = horizon_core::sync::lock(&cookies).get(&q.key).cloned();
                 reply(cfg::Serverbound::CookieResponse(cfg::CookieResponse {
                     key: q.key,
                     payload,
                 }))?
             }
             cfg::Clientbound::StoreCookie(p) => {
-                cookies.lock().unwrap().insert(p.key, p.payload);
+                horizon_core::sync::lock(&cookies).insert(p.key, p.payload);
             }
             cfg::Clientbound::ServerLinks(p) => {
                 let _ = send.send(Event::ServerLinks(p.links));
@@ -738,7 +738,7 @@ fn configure(
             }
             cfg::Clientbound::Disconnect(d) => return Err(plain(&d.reason, lang)),
             cfg::Clientbound::FinishConfiguration(_) => {
-                let mut w = writer.lock().unwrap();
+                let mut w = horizon_core::sync::lock(&writer);
                 let w = w.as_mut().ok_or("Disconnected")?;
                 w.send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
                     .map_err(|e| e.to_string())?;
@@ -969,7 +969,7 @@ mod tests {
                     .unwrap();
             }
             assert!(
-                writer.lock().unwrap().is_none(),
+                horizon_core::sync::lock(&writer).is_none(),
                 "connection was not closed"
             );
             assert!(
@@ -1031,7 +1031,7 @@ mod tests {
         assert!(
             matches!(events.recv_timeout(timeout).unwrap(), Event::Packet(p) if *p == play::Clientbound::Ping(cfg::Ping { id: 7 }))
         );
-        writer.lock().unwrap().take().unwrap().shutdown();
+        horizon_core::sync::lock(&writer).take().unwrap().shutdown();
         assert!(thread.join().unwrap().is_err());
     }
 
@@ -1150,7 +1150,7 @@ mod tests {
         ));
         // The stored cookie stays for the next connection (TransferState).
         assert_eq!(
-            cookies.lock().unwrap().get("proxy:session"),
+            horizon_core::sync::lock(&cookies).get("proxy:session"),
             Some(&vec![1, 2, 3])
         );
     }

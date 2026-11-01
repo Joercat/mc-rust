@@ -240,7 +240,7 @@ impl PlayerSender {
         }
     }
     fn held(&self) -> std::sync::MutexGuard<'_, Vec<Vec<u8>>> {
-        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+        horizon_core::sync::lock(&self.held)
     }
     pub fn send(&self, body: Vec<u8>) {
         self.pending.fetch_add(body.len(), Ordering::Relaxed);
@@ -1218,7 +1218,7 @@ impl SharedFrames {
             self.hashers.1.hash_one(body),
             threshold,
         );
-        let cache = || self.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        let cache = || horizon_core::sync::lock(&self.frames);
         if let Some(contents) = cache().frames.get(&key) {
             return Ok(contents.clone());
         }
@@ -1280,7 +1280,7 @@ fn write_loop(
             Ok(Out::Disconnect(reason)) => {
                 let _ = writer
                     .send(&play::Clientbound::Disconnect(cfg::Disconnect { reason }).encode());
-                std::thread::sleep(Duration::from_millis(50));
+                horizon_core::sync::sleep(Duration::from_millis(50));
                 break;
             }
             Ok(Out::Close) | Err(RecvTimeoutError::Disconnected) => break,
@@ -1403,7 +1403,7 @@ mod tests {
             assert_eq!(*shared, *frame::contents(body, Some(threshold)).unwrap());
         }
         // One frame per body and threshold.
-        assert_eq!(frames.frames.lock().unwrap().frames.len(), 3);
+        assert_eq!(horizon_core::sync::lock(&frames.frames).frames.len(), 3);
     }
 
     #[test]
@@ -1416,7 +1416,7 @@ mod tests {
         for n in 0..5u8 {
             frames.contents(&[n; 9000], 256).unwrap();
         }
-        let cache = frames.frames.lock().unwrap();
+        let cache = horizon_core::sync::lock(&frames.frames);
         assert!((1..=2).contains(&cache.frames.len()));
         assert_eq!(cache.order.len(), cache.frames.len());
         assert_eq!(

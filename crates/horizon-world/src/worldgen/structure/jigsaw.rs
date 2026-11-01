@@ -490,7 +490,7 @@ impl Pools {
         resources: &StructureResources,
         bindings: &FeatureBlockBindings<'_>,
     ) -> Option<Arc<Pool>> {
-        if let Some(found) = self.decoded.read().unwrap().get(name) {
+        if let Some(found) = horizon_core::sync::read(&self.decoded).get(name) {
             return found.clone();
         }
         let pool = self.raw.get(name).and_then(|json| {
@@ -525,9 +525,7 @@ impl Pools {
                 max_size: OnceLock::new(),
             }))
         });
-        self.decoded
-            .write()
-            .unwrap()
+        horizon_core::sync::write(&self.decoded)
             .insert(name.to_owned(), pool.clone());
         pool
     }
