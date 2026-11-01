@@ -7,7 +7,7 @@ const bootEl = document.getElementById("boot");
 const barEl = document.querySelector("#bar > i");
 const phaseEl = document.getElementById("phase");
 const logEl = document.getElementById("log");
-const hudEl = document.getElementById("hud");
+const canvasEl = document.getElementById("horizon-canvas");
 const errorEl = document.getElementById("error");
 
 const logLines = [];
@@ -42,7 +42,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.3";
+const BUILD = "2026-11-01.4";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -247,7 +247,9 @@ async function persist(db) {
   if (written.length === 0 && deleted.length === 0) return;
   const records = [];
   for (const [path, bytes, mtime] of written) {
-    records.push({ path, bytes: bytes.slice(), mtime });
+    // `bytes` is already a copy in the JS heap (`horizon_web_drain_changes`
+    // builds a Uint8Array); IndexedDB clones it again on the way in.
+    records.push({ path, bytes, mtime });
   }
   await writeFiles(db, records);
   await deleteFiles(db, deleted);
@@ -315,22 +317,24 @@ async function boot() {
 
   phase("ready", 1.0);
   say("event loop running");
+  // A Chromebook's top row sends Back, Refresh, Fullscreen and the volume and
+  // brightness keys, not F1-F12, unless "Use the top row keys as function
+  // keys" is on. The Alt aliases below are the same keys on every keyboard.
+  say("F1 HUD · F2 screenshot · F3 debug · F5 camera (ChromeOS: Alt+1/2/3/5, Alt+0 fullscreen)");
   bootEl.classList.add("hidden");
-  hudEl.style.opacity = "1";
-  document.getElementById("horizon-canvas").focus();
+  canvasEl.focus();
   running = true;
 
-  // Save what the game writes, and show a small status readout. `?persist=0`
-  // and `?status=0` turn either off: the boot probes use them to tell a
-  // storage stall from a renderer one.
-  let ticks = 0;
+  // Save what the game writes. `?persist=0` turns it off: the boot probes use
+  // it to tell a storage stall from a renderer one. The autosave only writes
+  // every minute, so eight seconds catches it without copying on every tick.
   if (params.get("persist") !== "0") setInterval(async () => {
     try {
       await persist(db);
     } catch (e) {
       console.warn("persist failed", e);
     }
-  }, 3000);
+  }, 8000);
   // Also on the way out: ask the game for a save, then mirror it.
   const flush = () => {
     try {
@@ -344,18 +348,15 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flush();
   });
+  // Kept for the boot probes and the console; the page draws no readout of its
+  // own, so nothing is written to the DOM here.
   setInterval(() => {
     try {
-      const status = JSON.parse(wasm.horizon_web_status());
       window.__horizon_status = wasm.horizon_web_status();
-      ticks += 1;
-      hudEl.textContent =
-        `${status.state} · ${status.fps ? status.fps.toFixed(0) : 0} fps · ` +
-        `${status.chunks} chunks · ${status.meshed_sections} meshes`;
     } catch (e) {
       /* keep the last readout */
     }
-  }, 500);
+  }, 1000);
 }
 
 // The browser owns most function keys: F1 opens its help, F3 find, F5 reloads
@@ -380,6 +381,75 @@ window.addEventListener(
       return;
     }
     if (GAME_KEYS.has(event.key) || GAME_KEYS.has(event.code)) event.preventDefault();
+  },
+  { capture: true },
+);
+
+// Function keys are re-sent from the page rather than passed through. The
+// engine binds on the event's `code`, and a Chromebook's top row (and some
+// other keyboards) can report F1-F12 with a code the engine does not know, or
+// not deliver them at all: F3 then opens the browser's find bar instead of the
+// debug screen. Dispatching on the canvas, where winit listens, gives the
+// engine one event with both `key` and `code` set. Alt plus a digit is the
+// fallback for a machine whose top row never sends the key itself, which is
+// what a Chromebook does until "Use the top row keys as function keys" is on.
+const FUNCTION_ALIASES = new Map([
+  ["Digit1", "F1"],
+  ["Digit2", "F2"],
+  ["Digit3", "F3"],
+  ["Digit5", "F5"],
+  ["Digit0", "F11"],
+]);
+let synthesizing = false;
+function sendKey(key) {
+  synthesizing = true;
+  try {
+    // Press and release: F3 switches the debug screen on the release, and the
+    // other bindings clear their held state there too.
+    for (const type of ["keydown", "keyup"]) {
+      canvasEl.dispatchEvent(
+        new KeyboardEvent(type, { key, code: key, bubbles: true, cancelable: true }),
+      );
+    }
+  } finally {
+    synthesizing = false;
+  }
+}
+const isFunctionKey = (key) => /^F([1-9]|1[0-2])$/.test(key) && key !== "F12";
+const isTyping = (target) =>
+  target instanceof HTMLElement &&
+  (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (!running || synthesizing || isTyping(event.target)) return;
+    if (isFunctionKey(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) sendKey(event.key);
+      return;
+    }
+    if (!event.altKey || event.ctrlKey || event.metaKey) return;
+    const key = FUNCTION_ALIASES.get(event.code);
+    if (!key) return;
+    event.preventDefault();
+    event.stopPropagation();
+    sendKey(key);
+  },
+  { capture: true },
+);
+// The matching release is swallowed too: the synthetic one already cleared the
+// key, and the real one would toggle F3's debug screen a second time.
+window.addEventListener(
+  "keyup",
+  (event) => {
+    if (!running || synthesizing || isTyping(event.target)) return;
+    const aliased =
+      event.altKey && !event.ctrlKey && !event.metaKey && FUNCTION_ALIASES.has(event.code);
+    if (isFunctionKey(event.key) || aliased) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
   },
   { capture: true },
 );

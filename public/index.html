@@ -35,13 +35,6 @@
         width: min(760px, 88vw); height: 132px; overflow: hidden; font-size: 11.5px;
         line-height: 1.5; color: #6b7486; white-space: pre-wrap;
       }
-      #hud {
-        position: fixed; right: 10px; bottom: 24px; z-index: 15;
-        font-size: 11px; line-height: 1.45; text-align: right;
-        color: #c3d1e6; background: rgba(8, 10, 14, 0.72);
-        padding: 6px 9px; border-radius: 6px; pointer-events: none;
-        opacity: 0; transition: opacity 300ms ease;
-      }
       #error {
         position: fixed; inset: 0; z-index: 40; display: none;
         padding: 40px; overflow: auto; background: #25090c; color: #ffd7d7;
@@ -58,7 +51,6 @@
       <div id="phase">starting…</div>
       <div id="log"></div>
     </div>
-    <div id="hud"></div>
     <pre id="error"></pre>
     <script type="module" src="./app.js"></script>
   </body>
