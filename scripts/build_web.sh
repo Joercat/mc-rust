@@ -114,6 +114,11 @@ diagnose_lang_item() {
   done
   echo "       patches cargo skipped, if any:" >&2
   grep -i 'was not used in the crate graph' "$LOG" | sed 's/^/         /' >&2 || true
+  local cfgdir
+  cfgdir="$(ls -d "$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE"/build/cfg-if/*/out 2>/dev/null | head -1)"
+  if [ -n "$cfgdir" ]; then
+    echo "       std's cfg-if: $(grep -ho 'cfg-if-[0-9][0-9.]*' "$cfgdir"/*.d 2>/dev/null | head -1)" >&2
+  fi
   echo "       dlmalloc was compiled with:" >&2
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
     cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
