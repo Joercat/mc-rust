@@ -95,6 +95,13 @@ threaded_cargo() {
 # item`) the compile command says which one: print its flags from a verbose
 # re-run, which only rebuilds the units that failed, so it is quick.
 diagnose_lang_item() {
+  echo "       build environment:" >&2
+  local name value
+  for name in RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_ENCODED_RUSTFLAGS \
+    RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN CARGO_HOME SCCACHE_DIR; do
+    value="${!name:-}"
+    if [ -n "$value" ]; then echo "         $name=$value" >&2; fi
+  done
   echo "       patches cargo skipped, if any:" >&2
   grep -i 'was not used in the crate graph' "$LOG" | sed 's/^/         /' >&2 || true
   echo "       dlmalloc was compiled with:" >&2
