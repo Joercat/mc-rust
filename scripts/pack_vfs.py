@@ -35,15 +35,45 @@ def collect_tree(src_root, vfs_prefix):
     return dirs, files
 
 
+def fail(message):
+    print(f"pack_vfs.py: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
 def main():
+    if len(sys.argv) != 4:
+        fail("usage: pack_vfs.py RESOURCES_DIR CACHE_DIR OUT_PATH")
     res_dir = sys.argv[1]
     cache_dir = sys.argv[2]
     out_path = sys.argv[3]
+
+    # An empty pack "succeeds" and then the page cannot load anything, which is
+    # much harder to diagnose than a refusal here. The game itself requires the
+    # prepared install's manifest at the root of the pack (`assets.rs`,
+    # `game.rs::preflight`), so a folder without it is the wrong folder.
+    if not os.path.isdir(res_dir):
+        fail(
+            f"{res_dir} is not a directory.\n"
+            "  Pass the prepared resource folder: the one holding\n"
+            "  horizon-resources.json (.local/horizon-client/<version> of a\n"
+            "  launcher install or of `horizon-prepare --prepare`)."
+        )
+    if not os.path.isfile(os.path.join(res_dir, "horizon-resources.json")):
+        fail(
+            f"{res_dir} has no horizon-resources.json, so it is not a prepared\n"
+            "  resource folder. The game reads that manifest from the root of the\n"
+            "  pack, so packing this folder would produce a pack that cannot load.\n"
+            "  Find the real one with: find ~ -name horizon-resources.json"
+        )
+    if not os.path.isdir(cache_dir):
+        print(f"pack_vfs.py: {cache_dir} is not a directory; packing no cache", file=sys.stderr)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     dirs1, files1 = collect_tree(res_dir, "/resources")
     dirs2, files2 = collect_tree(cache_dir, "/game/.horizon-cache")
+    if not files1:
+        fail(f"{res_dir} contains no files to pack")
     all_dirs = sorted(set(dirs1 + dirs2))
     all_files = sorted(files1 + files2, key=lambda x: x[0])
 

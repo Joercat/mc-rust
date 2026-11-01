@@ -98,7 +98,17 @@ rust-src's lockfile rather than `Cargo.lock`. `scripts/fetch_std_crates.py`
 vendors exactly those versions into the same directory, and
 `scripts/build_web.sh` runs it before the threaded build; without them that
 step fails with `no matching package named object found` and the page falls
-back to the single-threaded module.
+back to the single-threaded module. It also repairs crates that
+`assemble_vendor.py` copied from GitHub checkouts: their `.cargo-checksum.json`
+is `{"files":{}}`, with no `package` checksum, which the project's build
+tolerates but the `std` build does not (`error: checksum for `cfg-if v1.0.4`
+could not be calculated, but a checksum is listed in the existing lock file`).
+
+A threaded build that fails is reported as a failure: `scripts/build_web.sh`
+still publishes the single-threaded module, but exits non-zero, so a page that
+quietly fell back is not mistaken for one running on workers. Without a nightly
+toolchain at all the threaded module is skipped with a warning and the exit
+status stays 0.
 
 ## Building it from a blank machine
 

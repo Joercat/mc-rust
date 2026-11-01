@@ -65,34 +65,46 @@ THREAD_RUSTFLAGS="$BASE_RUSTFLAGS \
 NIGHTLY="${HORIZON_NIGHTLY:-nightly}"
 
 build_threaded() {
+  local wasm="$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/horizon-client.wasm"
+  local out="$TARGET_DIR/wasm-bindgen-web-threaded"
+  # Drop the previous module first: a failed build leaves it in place, and
+  # wasm-bindgen would then package that one and this script would report a
+  # success that did not happen. Each step is checked explicitly as well,
+  # because `set -e` does not apply inside a function called from an `if`.
+  rm -f "$wasm" "$out/horizon-client.js" "$out/horizon-client_bg.wasm"
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
     cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
       --profile "$PROFILE" --target wasm32-unknown-unknown \
-      -p horizon-client --bin horizon-client
-  local out="$TARGET_DIR/wasm-bindgen-web-threaded"
-  "$WRAPPER" --target web --no-typescript --out-dir "$out" \
-    "$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/horizon-client.wasm"
+      -p horizon-client --bin horizon-client || return 1
+  if [ ! -f "$wasm" ]; then
+    echo "error: cargo reported success but $wasm is missing" >&2
+    return 1
+  fi
+  "$WRAPPER" --target web --no-typescript --out-dir "$out" "$wasm" || return 1
   # Renamed: the page passes the wasm path itself, so the glue need not point
   # at its sibling (`public/app.js`).
-  cp "$out/horizon-client.js" public/horizon-client-threaded.js
-  cp "$out/horizon-client_bg.wasm" public/horizon-client-threaded_bg.wasm
+  cp "$out/horizon-client.js" public/horizon-client-threaded.js || return 1
+  cp "$out/horizon-client_bg.wasm" public/horizon-client-threaded_bg.wasm || return 1
 }
 
+threads_failed=0
 if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
   # `std`'s own dependencies (`object`, `addr2line`, `compiler_builtins`,
   # `dlmalloc`, …) are in rust-src's lockfile, not the project's, so they are
-  # not vendored by the scripts that build this directory.
+  # not vendored by the scripts that build this directory. The same script
+  # repairs crates copied from GitHub checkouts, whose checksum file has no
+  # `package` checksum, which the `std` build requires.
   VENDOR_DIR="$(sed -n 's/^directory *= *"\(.*\)"/\1/p' .cargo/config.toml | head -1)"
   if [ -n "$VENDOR_DIR" ] && [ -d "$VENDOR_DIR" ]; then
-    python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$NIGHTLY" >/dev/null 2>&1 \
-      || echo "warning: could not vendor std's build-std crates; see scripts/fetch_std_crates.py" >&2
+    python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$NIGHTLY" || threads_failed=1
   fi
-  if build_threaded; then
-    echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm"
-  else
-    echo "warning: the threaded module failed to build; the page will run single-threaded" >&2
-    echo "         (-Z build-std also needs std's own crates vendored: object, addr2line," >&2
-    echo "          compiler_builtins, dlmalloc, wasi*)" >&2
+  if [ "$threads_failed" -eq 0 ]; then
+    if build_threaded; then
+      echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm"
+    else
+      echo "error: the threaded module failed to build; cargo's output above says why" >&2
+      threads_failed=1
+    fi
   fi
 else
   echo "warning: no '$NIGHTLY' toolchain (needs rustup, rust-src): skipping the threaded module" >&2
@@ -100,3 +112,11 @@ fi
 
 echo "published public/horizon-client.js and public/horizon-client_bg.wasm"
 echo "serve with: python3 scripts/serve_web.py 5173"
+
+# A half-done build used to look like a success here, and the page then fell
+# back to the single-threaded module without anyone noticing. Say so.
+if [ "$threads_failed" -ne 0 ]; then
+  echo "error: only the single-threaded module is published; the page will run" >&2
+  echo "       single-threaded until the threaded build succeeds" >&2
+  exit 1
+fi
