@@ -431,21 +431,70 @@ mod imp {
         );
     }
 
-    pub fn drain_persisted_changes() -> (Vec<(String, Vec<u8>, u64)>, Vec<String>) {
-        let mut fs = crate::sync::write(state());
-        let dirty: Vec<String> = fs.dirty_files.iter().cloned().collect();
-        fs.dirty_files.clear();
-        let deleted: Vec<String> = fs.deleted_files.iter().cloned().collect();
-        fs.deleted_files.clear();
-        let mut written = Vec::with_capacity(dirty.len());
-        for path in dirty {
-            if let Some(entry) = fs.files.get(&path)
+    /// How many deletions one drain reports: the paths alone are small, but a
+    /// world that deletes a tree of files should not hand them all over at once
+    /// either.
+    const DELETIONS_PER_DRAIN: usize = 256;
+
+    /// The files changed under `/game` that the page has not stored yet, at
+    /// most about `budget` bytes of their contents: `(written, deleted, more)`.
+    ///
+    /// A save marks every chunk it wrote dirty in one go, and the region files
+    /// are hundreds of kilobytes each: copying all of them while holding the
+    /// lock is a hitch the page's frame pays for and cannot avoid. So each file
+    /// is taken out of the dirty set under the lock and copied without it, and
+    /// one call stops at the budget; `more` says another call has work left. A
+    /// file written again while its bytes are copied is marked dirty again, so
+    /// the next call reports it.
+    pub fn drain_persisted_changes(
+        budget: usize,
+    ) -> (Vec<(String, Vec<u8>, u64)>, Vec<String>, bool) {
+        let mut written = Vec::new();
+        let mut used = 0usize;
+        loop {
+            let next = {
+                let mut fs = crate::sync::write(state());
+                let path = fs.dirty_files.iter().next().cloned();
+                if let Some(path) = &path {
+                    fs.dirty_files.remove(path);
+                }
+                path
+            };
+            let Some(path) = next else { break };
+            // Taken out of the map by value: the copy (a region file, a
+            // compressed resource unpacked) happens with the lock released.
+            let entry = {
+                let fs = crate::sync::read(state());
+                fs.files.get(&path).cloned()
+            };
+            if let Some(entry) = entry
                 && let Ok(bytes) = entry.read_bytes()
             {
+                used += bytes.len();
                 written.push((path, bytes, entry.mtime_secs()));
             }
+            if used >= budget {
+                break;
+            }
         }
-        (written, deleted)
+        let deleted = {
+            let mut fs = crate::sync::write(state());
+            let deleted: Vec<String> = fs
+                .deleted_files
+                .iter()
+                .take(DELETIONS_PER_DRAIN)
+                .cloned()
+                .collect();
+            for path in &deleted {
+                fs.deleted_files.remove(path);
+            }
+            deleted
+        };
+        let more = {
+            let fs = crate::sync::read(state());
+            !fs.dirty_files.is_empty() || !fs.deleted_files.is_empty()
+        };
+        (written, deleted, more)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -753,23 +802,23 @@ mod imp {
 
         pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
             let writable = self.write || self.append;
-            let mut fs = crate::sync::write(state());
-            let norm = fs.normalize(path.as_ref());
-            if fs.dirs.contains(&norm) {
-                return Err(io::Error::new(io::ErrorKind::IsADirectory, norm));
-            }
-            if self.create_new && fs.files.contains_key(&norm) {
-                return Err(already_exists(&norm));
-            }
-            let (initial, mtime_secs, dirty) = match fs.files.get(&norm) {
-                Some(entry) => {
-                    if self.truncate && writable {
-                        (Vec::new(), now_secs(), true)
-                    } else {
-                        (entry.read_bytes()?, entry.mtime_secs(), false)
-                    }
+            // The entry is taken out of the map under the lock and its bytes are
+            // read after it is dropped: opening a resource can unpack a gzip
+            // member, and copying that while holding the filesystem's lock is
+            // time the page's frame spends waiting on it (a save running beside
+            // it holds the same lock for its own writes).
+            let (norm, existing, created) = {
+                let mut fs = crate::sync::write(state());
+                let norm = fs.normalize(path.as_ref());
+                if fs.dirs.contains(&norm) {
+                    return Err(io::Error::new(io::ErrorKind::IsADirectory, norm));
                 }
-                None => {
+                if self.create_new && fs.files.contains_key(&norm) {
+                    return Err(already_exists(&norm));
+                }
+                let existing = fs.files.get(&norm).cloned();
+                let mut created = None;
+                if existing.is_none() {
                     if !(self.create && writable) {
                         return Err(not_found(&norm));
                     }
@@ -783,10 +832,22 @@ mod imp {
                         },
                     );
                     fs.mark_modified(&norm);
-                    (Vec::new(), now, false)
+                    created = Some(now);
                 }
+                (norm, existing, created)
             };
-            drop(fs);
+
+            let (initial, mtime_secs, dirty) = match (existing, created) {
+                (Some(entry), _) => {
+                    if self.truncate && writable {
+                        (Vec::new(), now_secs(), true)
+                    } else {
+                        (entry.read_bytes()?, entry.mtime_secs(), false)
+                    }
+                }
+                (None, Some(now)) => (Vec::new(), now, false),
+                (None, None) => (Vec::new(), now_secs(), false),
+            };
 
             let mut file = FileInner {
                 norm_path: norm,

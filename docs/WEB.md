@@ -17,6 +17,7 @@ Query parameters:
 | `?world=<name>` | Skip the title screen and open (creating it if needed) a world. |
 | `creative=0`    | Start a new world in Survival (default is Creative).           |
 | `persist=0`     | Do not mirror the game's `/game` folder into IndexedDB.        |
+| `nocache=1`     | Ignore the stored engine and resource pack, and refresh them.   |
 
 The bottom-right readout shows the state, FPS, chunks and meshed sections; the
 browser console carries the engine's log.
@@ -209,6 +210,13 @@ files at all, the page stops with the same message the desktop client gives.
   is far faster. The FPS readout reflects that.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
+- The engine's wasm module and the resource pack are kept in a second IndexedDB
+  database (`horizon-web-cache`), so a reload compiles and mounts from the disk
+  copy instead of downloading tens of megabytes again. Their URLs carry the
+  build stamp (`?v=BUILD`), and each stored copy is revalidated with a
+  conditional request, so a repacked file under the same stamp is fetched once;
+  `?nocache=1` skips the stored copy. A browser that refuses the storage (a
+  private window, no quota) says so and downloads as before.
 - The threaded module needs a nightly toolchain with `rust-src`
   (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
   to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to
@@ -224,7 +232,7 @@ files at all, the page stops with the same message the desktop client gives.
   saves. Saves encode their modified chunks in the frame, so the interval is
   the trade: shorter loses less work when a page closes, longer hitches less
   often. Hiding the page also asks the game for an immediate save, and the page
-  mirrors its files to IndexedDB every three seconds and when it unloads, so a
+  mirrors its files to IndexedDB every eight seconds and when it unloads, so a
   reload lands on the position the player left.
 
 ## Threads
@@ -272,6 +280,28 @@ go through `horizon_core::sync` (`lock`, `read`, `write`), which spins on the
 page's main thread and parks only on workers; `horizon_threads` re-exports
 them. The mailbox polls (`try_recv`) rather than waits. Workers may block
 freely.
+
+Nothing on the frame's path waits on a lock a worker can hold. The log's
+recent-line buffer (`horizon-client-render/src/logging.rs`), the region writer's
+pending and outstanding bookkeeping with its `flush` (`save.rs`), the region
+cache and the far-terrain maps all take their locks through the shim, and
+`flush` polls the outstanding count where blocking is not allowed instead of
+waiting on the condition variable. The filesystem's own lock is held only for a
+lookup: `OpenOptions::open` copies (or unpacks) a file's bytes after dropping
+it, so opening a sound or a texture no longer queues behind a save's writes.
+
+The mirror to IndexedDB is sliced for the same reason.
+`drain_persisted_changes(budget)` takes each changed file out of the dirty set
+under the lock, copies it with the lock released, and stops at the budget;
+`horizon_web_drain_changes(budget)` hands that over as `[[path, bytes, mtime]…],
+[deleted…], more`, and the page loops with a `setTimeout` between slices. An
+autosave that dirtied hundreds of region files therefore no longer copies all
+of them in one main-thread call.
+
+A lock that still catches the frame throws `RuntimeError: Atomics.wait cannot
+be called in this context` out of the frame that took it rather than trapping
+the module, so `public/app.js` reports it and keeps drawing (the world is kept)
+instead of covering the page with the crash message.
 
 Still on the frame in the web build: resource loading (`par::par_map` maps
 serially, so the first load is still one thread), `WorldLoader`'s prepare step,

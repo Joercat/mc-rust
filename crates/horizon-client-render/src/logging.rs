@@ -307,7 +307,18 @@ impl log::Log for Logger {
     fn flush(&self) {
         let (done, wait) = mpsc::sync_channel(1);
         if self.out.send(Out::Flush(done)).is_ok() {
-            let _ = wait.recv_timeout(std::time::Duration::from_secs(1));
+            // A page's main thread may not park in a channel wait (the trap
+            // `Atomics.wait cannot be called in this context`), so it polls for
+            // the answer the log writer sends: that thread runs either way.
+            if horizon_core::sync::may_block() {
+                let _ = wait.recv_timeout(std::time::Duration::from_secs(1));
+            } else {
+                let deadline = horizon_core::time::Instant::now()
+                    + std::time::Duration::from_secs(1);
+                while wait.try_recv().is_err() && horizon_core::time::Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
+            }
         }
     }
 }
@@ -332,7 +343,10 @@ impl Logger {
             })
             .collect();
         {
-            let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+            // Every thread that logs takes this lock, and one of them is the
+            // page's main thread: through the shim it spins there instead of
+            // parking, which a browser's main thread may not do.
+            let mut recent = horizon_core::sync::lock(&self.recent);
             for line in &lines {
                 if recent.len() == RECENT {
                     recent.pop_front();
@@ -424,9 +438,7 @@ pub fn write_as(thread: &str, level: log::Level, message: &str) {
 /// The last lines written, oldest first (for crash reports).
 pub fn recent_lines() -> Vec<String> {
     LOGGER.get().map_or_else(Vec::new, |l| {
-        l.recent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        horizon_core::sync::lock(&l.recent)
             .iter()
             .cloned()
             .collect()

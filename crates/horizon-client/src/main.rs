@@ -108,9 +108,18 @@ mod web_entry {
         horizon_core::vfs::import_persisted_file(path, data, secs);
     }
 
+    /// The changed `/game` files, about `budget` bytes of them: `[[path, bytes,
+    /// mtime], …], [deleted path, …], more]`. The page drains in slices, so an
+    /// autosave that dirtied hundreds of region files never copies them all in
+    /// one call: that copy runs on the page's main thread, between frames.
     #[wasm_bindgen]
-    pub fn horizon_web_drain_changes() -> js_sys::Array {
-        let (written, deleted) = horizon_core::vfs::drain_persisted_changes();
+    pub fn horizon_web_drain_changes(budget: f64) -> js_sys::Array {
+        let budget = if budget.is_finite() && budget > 0.0 {
+            budget as usize
+        } else {
+            4 << 20
+        };
+        let (written, deleted, more) = horizon_core::vfs::drain_persisted_changes(budget);
         let written_arr = js_sys::Array::new();
         for (path, bytes, mtime) in written {
             let item = js_sys::Array::new();
@@ -124,10 +133,11 @@ mod web_entry {
         for path in deleted {
             deleted_arr.push(&JsValue::from_str(&path));
         }
-        let pair = js_sys::Array::new();
-        pair.push(&written_arr.into());
-        pair.push(&deleted_arr.into());
-        pair
+        let triple = js_sys::Array::new();
+        triple.push(&written_arr.into());
+        triple.push(&deleted_arr.into());
+        triple.push(&JsValue::from_bool(more));
+        triple
     }
 
     #[wasm_bindgen]

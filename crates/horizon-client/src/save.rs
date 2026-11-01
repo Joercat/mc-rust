@@ -1709,7 +1709,7 @@ fn cached_region(
     path: &Path,
     create: bool,
 ) -> Result<Option<Arc<Mutex<RegionFile>>>> {
-    let mut regions = cache.lock().map_err(|_| "region cache poisoned")?;
+    let mut regions = horizon_core::sync::lock(cache);
     if let Some(Some(region)) = regions.get(&key) {
         return Ok(Some(region.clone()));
     }
@@ -1765,7 +1765,7 @@ fn write_region_records(
         let Some(region) = cached_region(cache, (rx, rz), &path, create)? else {
             continue;
         };
-        let mut region = region.lock().map_err(|_| "region file poisoned")?;
+        let mut region = horizon_core::sync::lock(&region);
         let mut changed = false;
         for (pos, record) in &list {
             match record {
@@ -1911,10 +1911,7 @@ fn read_region_record(
     let Some(region) = cached_region(cache, key, &path, false)? else {
         return Ok(None);
     };
-    let record = region
-        .lock()
-        .map_err(|_| "region file poisoned")?
-        .read(ChunkPos::new(x, z))?;
+    let record = horizon_core::sync::lock(&region).read(ChunkPos::new(x, z))?;
     Ok(match record {
         Some(r) => Some(r.nbt(Limits::saved())?),
         None => None,
@@ -1978,9 +1975,9 @@ fn write_batch(
     // IOWorker.pendingWrites: a chunk queued again since is
     // written once, by its newest batch.
     let newest = |k: &(i32, i32), seq: u64| {
-        pending
-            .lock()
-            .map_or(true, |p| p.get(&(kind, k.0, k.1)).is_none_or(|p| p.0 <= seq))
+        horizon_core::sync::lock(pending)
+            .get(&(kind, k.0, k.1))
+            .is_none_or(|p| p.0 <= seq)
     };
     let resolved: Vec<_> = batch
         .1
@@ -1995,20 +1992,19 @@ fn write_batch(
     if let Err(e) = &result {
         let message = format!("failed to write {folder} files: {e}");
         log::warn!("Horizon: {message}");
-        *outstanding.error.lock().unwrap() = Some(message);
+        *horizon_core::sync::lock(&outstanding.error) = Some(message);
     }
     // Keep failed snapshots readable; never report them as durable.
-    if result.is_ok()
-        && let Ok(mut pending) = pending.lock()
-    {
+    if result.is_ok() {
+        let mut pending = horizon_core::sync::lock(pending);
         for (k, _, seq) in &batch.1 {
             if pending.get(&(kind, k.0, k.1)).is_some_and(|p| p.0 == *seq) {
                 pending.remove(&(kind, k.0, k.1));
             }
         }
     }
-    if let Ok(mut count) = outstanding.count.lock() {
-        *count -= 1;
+    {
+        *horizon_core::sync::lock(&outstanding.count) -= 1;
         outstanding.done.notify_all();
     }
 }
@@ -2130,7 +2126,7 @@ impl SaveDir {
     /// held the far view back for minutes.
     fn lod_saved(&self, x: i32, z: i32) -> bool {
         let key = (x >> 5, z >> 5);
-        let mut regions = self.lod_regions.lock().unwrap();
+        let mut regions = horizon_core::sync::lock(&self.lod_regions);
         let fresh = regions
             .get(&key)
             .is_some_and(|region| region.checked.elapsed() < LOD_REGION_TTL);
@@ -2162,10 +2158,7 @@ impl SaveDir {
         region_path(&self.root, folder, rx, rz)
     }
     fn read_record(&self, folder: &str, x: i32, z: i32) -> Option<NamedTag> {
-        let pending = self
-            .pending
-            .lock()
-            .ok()?
+        let pending = horizon_core::sync::lock(&self.pending)
             .get(&(Folder::of(folder), x, z))
             .map(|(_, r)| r.clone());
         if let Some(record) = pending {
@@ -2242,18 +2235,14 @@ impl SaveDir {
         if !records.is_empty() {
             let mut batch = Vec::with_capacity(records.len());
             {
-                let mut pending = self.pending.lock().map_err(|_| "pending writes poisoned")?;
+                let mut pending = horizon_core::sync::lock(&self.pending);
                 for (key, record) in records {
                     let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
                     pending.insert((folder, key.0, key.1), (seq, record.clone()));
                     batch.push((key, record, seq));
                 }
             }
-            *self
-                .outstanding
-                .count
-                .lock()
-                .map_err(|_| "writer poisoned")? += 1;
+            *horizon_core::sync::lock(&self.outstanding.count) += 1;
             #[cfg(target_arch = "wasm32")]
             {
                 write_batch(
@@ -2268,21 +2257,14 @@ impl SaveDir {
                 );
             }
             #[cfg(not(target_arch = "wasm32"))]
-            let mut writer = self.writer.lock().map_err(|_| "writer poisoned")?;
+            let mut writer = horizon_core::sync::lock(&self.writer);
             #[cfg(not(target_arch = "wasm32"))]
             let writer = writer.get_or_insert_with(|| self.start_writer());
             #[cfg(not(target_arch = "wasm32"))]
             if writer.send.send((folder, batch)).is_err() {
-                *self
-                    .outstanding
-                    .error
-                    .lock()
-                    .map_err(|_| "writer poisoned")? = Some("the region writer stopped".into());
-                *self
-                    .outstanding
-                    .count
-                    .lock()
-                    .map_err(|_| "writer poisoned")? -= 1;
+                *horizon_core::sync::lock(&self.outstanding.error) =
+                    Some("the region writer stopped".into());
+                *horizon_core::sync::lock(&self.outstanding.count) -= 1;
                 self.outstanding.done.notify_all();
                 return Err("the region writer stopped".into());
             }
@@ -2333,11 +2315,23 @@ impl SaveDir {
     }
     /// Wait until every queued write is on disk.
     pub fn flush(&self) -> Result<()> {
-        let mut count = self
-            .outstanding
-            .count
-            .lock()
-            .map_err(|_| "writer poisoned")?;
+        // A page's main thread may not park in a condition variable (that is
+        // `RuntimeError: Atomics.wait cannot be called in this context`, which
+        // used to end the whole page): it polls the counter instead. The writes
+        // it waits for run on the worker that queued them, or inline there, so
+        // it never waits for work this thread owes.
+        if !horizon_core::sync::may_block() {
+            let deadline =
+                horizon_core::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !self.writes_finished()? {
+                if horizon_core::time::Instant::now() > deadline {
+                    return Err("the region writer did not finish the save".into());
+                }
+                std::hint::spin_loop();
+            }
+            return self.write_result();
+        }
+        let mut count = horizon_core::sync::lock(&self.outstanding.count);
         while *count > 0 {
             count = self
                 .outstanding
@@ -2345,26 +2339,20 @@ impl SaveDir {
                 .wait(count)
                 .map_err(|_| "writer poisoned")?;
         }
+        drop(count);
         self.write_result()
     }
     /// Poll durability without holding up the event loop. Errors remain visible
     /// to every waiter, including a later synchronous shutdown.
     pub fn writes_finished(&self) -> Result<bool> {
-        let count = self
-            .outstanding
-            .count
-            .lock()
-            .map_err(|_| "writer poisoned")?;
+        let count = horizon_core::sync::lock(&self.outstanding.count);
+        let finished = *count == 0;
+        drop(count);
         self.write_result()?;
-        Ok(*count == 0)
+        Ok(finished)
     }
     fn write_result(&self) -> Result<()> {
-        match &*self
-            .outstanding
-            .error
-            .lock()
-            .map_err(|_| "writer poisoned")?
-        {
+        match &*horizon_core::sync::lock(&self.outstanding.error) {
             Some(error) => Err(error.clone().into()),
             None => Ok(()),
         }
@@ -4074,13 +4062,15 @@ impl SaveDir {
         assets: &crate::assets::Assets,
         biomes: &Biomes,
     ) -> Option<LodSurfaces> {
-        if let Some((at, columns)) = self.lod_decoded.lock().unwrap().chunks.get(&(x, z))
+        if let Some((at, columns)) = horizon_core::sync::lock(&self.lod_decoded)
+            .chunks
+            .get(&(x, z))
             && at.elapsed() < LOD_DECODED_TTL
         {
             return Some(columns.clone());
         }
         let columns = self.lod_surfaces(x, z, assets, biomes)?;
-        let mut decoded = self.lod_decoded.lock().unwrap();
+        let mut decoded = horizon_core::sync::lock(&self.lod_decoded);
         let fresh = (horizon_core::time::Instant::now(), columns.clone());
         if decoded.chunks.insert((x, z), fresh).is_none() {
             decoded.order.push_back((x, z));
@@ -4099,10 +4089,7 @@ impl SaveDir {
         assets: &crate::assets::Assets,
         biomes: &Biomes,
     ) -> Option<LodSurfaces> {
-        let pending = self
-            .pending
-            .lock()
-            .ok()?
+        let pending = horizon_core::sync::lock(&self.pending)
             .get(&(Folder::Region, x, z))
             .map(|(_, record)| record.clone());
         let root = if let Some(record) = pending {
