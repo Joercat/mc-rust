@@ -82,6 +82,21 @@ The pieces, in build order:
    (An empty directory works for the cache argument; it is packed as
    `/game/.horizon-cache` and rebuilt on the first world load.)
 
+   The sound library is most of the pack. `--audio-bitrate 64k` re-encodes the
+   Ogg Vorbis effects at 64 kbit/s (96 kbit/s for files over 30 seconds) into a
+   scratch folder before packing, which roughly halves the archive; the
+   prepared install keeps its full-quality audio. Files already at or below the
+   target are copied, so nothing is encoded twice:
+
+   ```sh
+   python3 scripts/pack_vfs.py PATH/TO/.local/horizon-client/26.3 \
+     PATH/TO/.horizon-cache public/horizon-vfs.bin --audio-bitrate 64k
+   ```
+
+   `scripts/compress_audio.py` runs the same pass on its own, writing the
+   re-encoded tree elsewhere (`--jobs` sets the encoders), if a pack is built
+   some other way.
+
 The page checks for the engine it picked (`public/horizon-client.js` and
 `public/horizon-client_bg.wasm`, or the threaded pair) and
 `public/horizon-vfs.bin` before it starts and, when they are absent (they are

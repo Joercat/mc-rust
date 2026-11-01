@@ -3124,15 +3124,12 @@ impl Renderer {
         });
         // With video and system memory both full, the section is not drawn.
         let (page, start) = self.arena.alloc(&self.device, encoder, vertices)?;
+        // Sorted indices only order the quads for blending. When the index
+        // arena is full the section still draws them in mesh order below,
+        // instead of losing its water (and its terrain) altogether.
         let sorted_indices = if translucent > 0 {
-            let indices =
-                self.sorted_indices
-                    .alloc(&self.device, encoder, u64::from(translucent) * 6);
-            if indices.is_none() {
-                self.arena.release(page, start, vertices);
-                return None;
-            }
-            indices
+            self.sorted_indices
+                .alloc(&self.device, encoder, u64::from(translucent) * 6)
         } else {
             None
         };
@@ -3227,10 +3224,16 @@ impl Renderer {
                 // not worth a renderer. Bind the section's vertices and its
                 // origin as slices instead; the indices stay section-local.
                 let stride = std::mem::size_of::<TerrainVertex>() as u64;
+                let mut instance = u32::MAX;
                 for d in &draws[i..i + run] {
                     let vertices = u64::from(d[3]) * stride;
                     pass.set_vertex_buffer(0, self.arena.buffer(page).slice(vertices..));
-                    pass.set_vertex_buffer(1, self.instances.slice(u64::from(d[4]) * 16..));
+                    // A section's sides share one instance transform; rebinding
+                    // it per side is a driver call each time.
+                    if d[4] != instance {
+                        instance = d[4];
+                        pass.set_vertex_buffer(1, self.instances.slice(u64::from(instance) * 16..));
+                    }
                     pass.draw_indexed(d[2]..d[2] + d[0], 0, 0..1);
                 }
             }
@@ -4215,27 +4218,37 @@ impl Renderer {
         self.translucency_cursor %= count.max(1);
         for (i, v) in visible.iter().enumerate().rev() {
             let s = self.sections.get_mut(v.slot);
-            if let Some((index_page, index_start)) = s.sorted_indices {
-                let nearby = (v.key.0 - camera_section.0).abs() <= 2
-                    && (v.key.1 - camera_section.1).abs() <= 2
-                    && (v.key.2 - camera_section.2).abs() <= 2;
-                let scheduled = (i + count - self.translucency_cursor) % count < budget;
-                let origin = [
-                    v.key.0 * 16,
-                    crate::chunk::MIN_Y + v.key.1 * 16,
-                    v.key.2 * 16,
-                ];
-                if (!s.sort.is_sorted() || nearby || scheduled)
-                    && let Some(indices) =
-                        s.sort
-                            .update(camera.to_array(), origin, &mut self.translucent_sorter)
-                {
-                    self.uploads.buffer(
-                        &mut encoder,
-                        self.sorted_indices.buffer(index_page),
-                        index_start * 4,
-                        bytemuck::cast_slice(indices),
-                    );
+            if s.translucent > 0 {
+                // Without a sorted page (the index arena was full when the
+                // section uploaded) the quads draw in mesh order: the shared
+                // quad indices, bound at the section's first vertex, still
+                // name every one of them.
+                let mut index_start = 0u64;
+                let mut index_page = None;
+                if let Some((page, start)) = s.sorted_indices {
+                    index_start = start;
+                    index_page = Some(page);
+                    let nearby = (v.key.0 - camera_section.0).abs() <= 2
+                        && (v.key.1 - camera_section.1).abs() <= 2
+                        && (v.key.2 - camera_section.2).abs() <= 2;
+                    let scheduled = (i + count - self.translucency_cursor) % count < budget;
+                    let origin = [
+                        v.key.0 * 16,
+                        crate::chunk::MIN_Y + v.key.1 * 16,
+                        v.key.2 * 16,
+                    ];
+                    if (!s.sort.is_sorted() || nearby || scheduled)
+                        && let Some(indices) =
+                            s.sort
+                                .update(camera.to_array(), origin, &mut self.translucent_sorter)
+                    {
+                        self.uploads.buffer(
+                            &mut encoder,
+                            self.sorted_indices.buffer(page),
+                            start * 4,
+                            bytemuck::cast_slice(indices),
+                        );
+                    }
                 }
                 let first = s.start + u64::from(s.solid) * 4;
                 self.translucent_draws.push((
@@ -4248,7 +4261,7 @@ impl Renderer {
                         first as u32,
                         i as u32,
                     ],
-                    (s.page, Some(index_page)),
+                    (s.page, index_page),
                 ));
             }
         }
