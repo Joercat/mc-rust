@@ -72,6 +72,30 @@ async function chooseEngine() {
   return { ...ENGINES.single, threaded: false };
 }
 
+// A browser without a WebGPU adapter still lets a page ask for one, and that
+// call binds a `webgpu` context to the canvas. wgpu's WebGL2 fallback then says
+// "canvas already in use" and no backend is left at all. Ask for an adapter
+// first, and when there is none select WebGL2 before the engine starts: it
+// reads the query string itself, so putting it in the URL is enough.
+async function pickRenderer(params) {
+  if (params.get("backend") === "webgl") return;
+  if (!navigator.gpu || typeof navigator.gpu.requestAdapter !== "function") {
+    say("no WebGPU in this browser: starting on WebGL2");
+  } else {
+    let adapter = null;
+    try {
+      adapter = await navigator.gpu.requestAdapter();
+    } catch (error) {
+      console.warn("[horizon] requestAdapter failed", error);
+    }
+    if (adapter) return;
+    say("no WebGPU adapter: starting on WebGL2");
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("backend", "webgl");
+  window.history.replaceState(null, "", url);
+}
+
 async function loadEngine() {
   const engine = await chooseEngine();
   const missing = [];
@@ -248,6 +272,7 @@ async function boot() {
   const params = new URLSearchParams(window.location.search);
   const world = params.get("world");
   const creative = params.get("creative") !== "0";
+  await pickRenderer(params);
   await wasm.horizon_web_start("horizon-canvas", width, height, world, creative);
 
   phase("ready", 1.0);

@@ -5367,11 +5367,12 @@ impl Game<'_> {
             self.world.weather.tick_levels();
             self.tick_weather_effects();
         }
-        // The autosave: every five minutes as in the game, and every ten
-        // seconds in a browser, where a page can be closed (or navigated away
-        // from) without the save a quit runs.
+        // The autosave: every five minutes as in the game, and every half
+        // minute in a browser, where a page can be closed (or navigated away
+        // from) without the save a quit runs. Ten seconds was too eager: a save
+        // encodes every modified chunk in the frame and the page hitches.
         #[cfg(target_arch = "wasm32")]
-        let autosave_ticks = 200;
+        let autosave_ticks = 600;
         #[cfg(not(target_arch = "wasm32"))]
         let autosave_ticks = 6000;
         self.autosaving = self.ticks.is_multiple_of(autosave_ticks);
@@ -11999,7 +12000,13 @@ impl Game<'_> {
         }
         self.save_level(wait)?;
         self.save_parked_levels(wait)?;
-        self.save_game_metadata()
+        self.save_game_metadata()?;
+        // Only a save the player asked for says so: the browser autosaves
+        // every half minute, so a toast on each would never leave the screen.
+        if wait {
+            self.message = Some(("Saved the game".into(), Instant::now()));
+        }
+        Ok(())
     }
     fn save_game_metadata(&mut self) -> Result<()> {
         self.save_maps();
@@ -12017,7 +12024,6 @@ impl Game<'_> {
         self.store_owner();
         self.level.write(&self.world_root)?;
         self.save_world_state();
-        self.message = Some(("Saved the game".into(), Instant::now()));
         Ok(())
     }
     /// Save the level in place: its changed chunks, its entities and its raids.
