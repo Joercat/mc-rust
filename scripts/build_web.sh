@@ -159,6 +159,14 @@ build_threaded() {
         echo "       on this machine. the block above names the one dlmalloc got." >&2
         return 1
       fi
+      # If std itself was built during this run, clearing cannot change the
+      # outcome, and a retry would spend minutes rebuilding it to fail the same
+      # way. Same-machine evidence beats the hope that the directory is bad.
+      if grep -q 'Compiling core v' "$LOG"; then
+        echo "       (std was built from scratch in this run, so clearing it cannot" >&2
+        echo "       change anything; not retrying)" >&2
+        return 1
+      fi
       echo "note: the std cache in $THREAD_TARGET_DIR cannot be used" >&2
       echo "      clearing it and building again ($THREAD_VERSION)" >&2
       rm -rf "$THREAD_TARGET_DIR"
