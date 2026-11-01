@@ -10,6 +10,20 @@ terrain meshing, entities, the HUD, the menus, and saving to browser storage.
 python3 scripts/serve_web.py 5173     # then open http://localhost:5173/
 ```
 
+Cross-origin isolation — what lets the page load the threaded engine — needs a
+secure context, and only `localhost` is one over plain HTTP. Opened from
+another device as `http://<host-ip>:5173`, the page is single-threaded however
+correct its headers are, and terrain then streams in on the render thread. Add
+`--tls` to serve HTTPS with a self-signed certificate instead:
+
+```sh
+python3 scripts/serve_web.py 5173 --tls   # https://<host-ip>:5173/, accept the warning once
+```
+
+The certificate is made on first use (it needs `openssl`) in `.web-cert/`, for
+`localhost`, the machine's name and its addresses; pass `--cert`/`--key` for
+your own.
+
 Query parameters:
 
 | Parameter       | Meaning                                                        |
@@ -237,8 +251,9 @@ only collects what finished. On the desktop the same pool is a set of OS
 threads; nothing else about streaming changes.
 
 The page loads the threaded module when it is built and the page is
-cross-origin isolated (`crossOriginIsolated`, which `serve_web.py` provides
-with its COOP/COEP headers). Otherwise it loads the single-threaded module,
+cross-origin isolated (`crossOriginIsolated`: `serve_web.py` provides it with
+its COOP/COEP headers, and the page must be a secure context — `localhost` or
+HTTPS, as `--tls` serves). Otherwise it loads the single-threaded module,
 which behaves as before: jobs run on the frame, up to 24 ms of each frame while
 a world loads and 10 ms otherwise.
 

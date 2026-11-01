@@ -13,3 +13,6 @@
 /public/horizon-client-threaded.js
 /public/horizon-client-threaded_bg.wasm
 /public/*.gz
+
+# scripts/serve_web.py --tls: a private key never belongs in the repository.
+/.web-cert/
