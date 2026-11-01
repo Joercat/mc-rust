@@ -106,7 +106,7 @@ threaded_cargo() {
 # re-run, which only rebuilds the units that failed, so it is quick.
 diagnose_lang_item() {
   echo "       build environment:" >&2
-  local name value
+  local name value line unit src verbose="$TARGET_DIR/threaded-verbose.log"
   for name in RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER CARGO_ENCODED_RUSTFLAGS \
     RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN CARGO_HOME SCCACHE_DIR; do
     value="${!name:-}"
@@ -114,19 +114,27 @@ diagnose_lang_item() {
   done
   echo "       patches cargo skipped, if any:" >&2
   grep -i 'was not used in the crate graph' "$LOG" | sed 's/^/         /' >&2 || true
-  local cfgdir
-  cfgdir="$(ls -d "$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE"/build/cfg-if/*/out 2>/dev/null | head -1)"
-  if [ -n "$cfgdir" ]; then
-    echo "       std's cfg-if: $(grep -ho 'cfg-if-[0-9][0-9.]*' "$cfgdir"/*.d 2>/dev/null | head -1)" >&2
-  fi
-  echo "       dlmalloc was compiled with:" >&2
+  # The unit that just failed is rebuilt by this run, so `-v` prints its command
+  # line. Keep the whole thing: it is also the only place the cfg-if unit id of
+  # *this* build appears, and its source path names the version.
   RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
     cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
       --profile "$PROFILE" --target wasm32-unknown-unknown \
-      -p horizon-client --bin horizon-client -v 2>&1 \
-    | grep -m1 -- '--crate-name dlmalloc' \
+      -p horizon-client --bin horizon-client -v >"$verbose" 2>&1 || true
+  line="$(grep -m1 -- '--crate-name dlmalloc' "$verbose" || true)"
+  if [ -z "$line" ]; then
+    echo "       dlmalloc was not recompiled; the full run is in $verbose" >&2
+    return
+  fi
+  unit="$(printf '%s' "$line" | grep -o 'cfg-if/[a-f0-9]*/out' | head -1)"
+  if [ -n "$unit" ]; then
+    src="$(grep -ho 'cfg-if-[0-9][0-9.]*' "$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/build/$unit"/*.d 2>/dev/null | head -1)"
+    echo "       dlmalloc's cfg-if: ${src:-unknown} ($unit)" >&2
+  fi
+  echo "       dlmalloc was compiled with:" >&2
+  printf '%s\n' "$line" \
     | grep -o -e '--extern [^ ]*' -e '-Z [^ ]*' -e '--sysroot [^ ]*' -e '-C target-feature=[^ ]*' \
-    | sed 's/^/         /' >&2 || true
+    | sed 's/^/         /' >&2
 }
 
 build_threaded() {
