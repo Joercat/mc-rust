@@ -77,7 +77,15 @@ async function chooseEngine() {
     return { ...ENGINES.threaded, threaded: true };
   }
   if (isolated) say("threaded engine not built: using the single-threaded one");
-  else say("page is not cross-origin isolated: single-threaded engine");
+  else if (
+    location.protocol === "http:" &&
+    !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)
+  ) {
+    // Isolation also needs a secure context, and a plain-HTTP LAN address is
+    // not one however good the headers are: only localhost or HTTPS gets it.
+    say("threads need HTTPS or localhost: single-threaded engine");
+  } else say("page is not cross-origin isolated: single-threaded engine");
+  console.warn("[horizon] cross-origin isolated:", isolated, location.origin);
   return { ...ENGINES.single, threaded: false };
 }
 
