@@ -90,10 +90,25 @@ threaded_cargo() {
       -p horizon-client --bin horizon-client 2>&1 | tee "$LOG"
 }
 
+# `-Z build-std` links std's own dependencies against the `core` it rebuilt.
+# When `dlmalloc` or `cfg_if` is handed two `core` crates (`E0152 duplicate lang
+# item`) the compile command says which one: print its flags from a verbose
+# re-run, which only rebuilds the units that failed, so it is quick.
+diagnose_lang_item() {
+  echo "       dlmalloc was compiled with:" >&2
+  RUSTFLAGS="$THREAD_RUSTFLAGS" CARGO_TARGET_DIR="$THREAD_TARGET_DIR" \
+    cargo +"$NIGHTLY" build -Z build-std=std,panic_abort --offline \
+      --profile "$PROFILE" --target wasm32-unknown-unknown \
+      -p horizon-client --bin horizon-client -v 2>&1 \
+    | grep -m1 -- '--crate-name dlmalloc' \
+    | tr ' ' '\n' \
+    | grep -E '^(--extern|-Z|--sysroot|-C target-feature|--cfg)' \
+    | sed 's/^/         /' >&2 || true
+}
+
 build_threaded() {
   local wasm="$THREAD_TARGET_DIR/wasm32-unknown-unknown/$PROFILE/horizon-client.wasm"
-  local out="$TARGET_DIR/wasm-bindgen-web-threaded"
-  # Drop the previous module first: a failed build leaves it in place, and
+  local out="$TARGET_DIR/wasm-bindgen-web-threaded"  # Drop the previous module first: a failed build leaves it in place, and
   # wasm-bindgen would then package that one and this script would report a
   # success that did not happen. Each step is checked explicitly as well,
   # because `set -e` does not apply inside a function called from an `if`.
@@ -106,10 +121,18 @@ build_threaded() {
     # that does not require guesswork. Only std was built, so the retry costs
     # minutes, not the whole build.
     if grep -q 'duplicate lang item' "$LOG"; then
+      diagnose_lang_item
+      if [ "$THREAD_DIR_FRESH" -eq 1 ]; then
+        echo "error: the build failed with nothing cached to clear, so this is not" >&2
+        echo "       a stale directory: the std build is picking up the wrong \`core\`" >&2
+        echo "       on this machine. the block above names the one dlmalloc got." >&2
+        return 1
+      fi
       echo "note: the std cache in $THREAD_TARGET_DIR cannot be used" >&2
       echo "      clearing it and building again ($THREAD_VERSION)" >&2
       rm -rf "$THREAD_TARGET_DIR"
       if ! threaded_cargo; then
+        diagnose_lang_item
         echo "error: the threaded build failed again with nothing left over from" >&2
         echo "       an earlier run, so this is not a stale cache: $LOG" >&2
         return 1
@@ -145,7 +168,20 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
     python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$NIGHTLY" || threads_failed=1
   fi
   if [ "$threads_failed" -eq 0 ]; then
+    # `-Z build-std` rewrites Cargo.lock: std's own dependencies get entries.
+    # A lock left rewritten by an earlier run is a different build graph, and
+    # the one input a fresh target directory does not reset. Start every
+    # threaded build from the committed lock (keeping the old one beside the
+    # log) and put it back afterwards.
+    if git rev-parse --git-dir >/dev/null 2>&1 && [ -f Cargo.lock ] \
+      && ! git diff --quiet -- Cargo.lock; then
+      echo "note: Cargo.lock differs from the commit; building from the committed one" >&2
+      echo "      (the working copy is saved as $TARGET_DIR/Cargo.lock.before)" >&2
+      cp Cargo.lock "$TARGET_DIR/Cargo.lock.before"
+      git checkout -- Cargo.lock
+    fi
     mkdir -p "$THREAD_TARGET_DIR"
+    if [ -n "$(ls -A "$THREAD_TARGET_DIR" 2>/dev/null)" ]; then THREAD_DIR_FRESH=0; else THREAD_DIR_FRESH=1; fi
     if build_threaded; then
       echo "published the threaded module: public/horizon-client-threaded.js and _bg.wasm ($NIGHTLY)"
     else
@@ -154,6 +190,9 @@ if cargo +"$NIGHTLY" --version >/dev/null 2>&1; then
       echo "       $NIGHTLY, which this script uses by default ($NIGHTLY_HINT)" >&2
       threads_failed=1
     fi
+    # Undo the lock rewrite this build made, so the next run starts from the
+    # same graph (and a failed one does not poison the following attempt).
+    git checkout -- Cargo.lock 2>/dev/null || true
   fi
 else
   echo "warning: no '$NIGHTLY' toolchain (needs rustup, rust-src): skipping the threaded module" >&2
