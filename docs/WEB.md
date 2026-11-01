@@ -65,18 +65,86 @@ The pieces, in build order:
    then `horizon-web-prepare` and `scripts/pack_vfs.py` pack the game data into
    `public/horizon-vfs.bin` (`HZVFS001`). The attribute catalog needs the
    per-entity `DefaultAttributes` suppliers; `scripts/gen_attribute_defaults.py`
-   extracts them (from Pumpkin's generated entity table) and
+   extracts them   (from Pumpkin's generated entity table) and
    `scripts/fill_attribute_defaults.py` merges them into an existing archive.
 
-The page checks for `public/horizon-client.js`,
-`public/horizon-client_bg.wasm` and `public/horizon-vfs.bin` before it starts
-and, when they are absent (they are build outputs and gitignored, so a fresh
-checkout has none), says which ones are missing and how to build them instead
-of hanging on the loading screen.
+   An install that is already prepared — the launcher's folder, or one made
+   with `horizon-prepare --prepare --server-jar …` — needs none of that: its
+   `resources/` already holds the binary tables, so the pack is one command:
+
+   ```sh
+   python3 scripts/pack_vfs.py PATH/TO/resources PATH/TO/.horizon-cache public/horizon-vfs.bin
+   ```
+
+   (An empty directory works for the cache argument; it is packed as
+   `/game/.horizon-cache` and rebuilt on the first world load.)
+
+The page checks for the engine it picked (`public/horizon-client.js` and
+`public/horizon-client_bg.wasm`, or the threaded pair) and
+`public/horizon-vfs.bin` before it starts and, when they are absent (they are
+build outputs and gitignored, so a fresh checkout has none), says which ones are
+missing and how to build them instead of hanging on the loading screen.
 
 `scripts/build_web.sh` runs the wasm build, `wasm-bindgen`
 (`crates/horizon-wasm-bindgen`, a wrapper around `wasm-bindgen-cli-support`),
-and copies the glue into `public/`.
+and copies the glue into `public/`. It builds the single-threaded module first
+and then, with a nightly toolchain, the threaded one (see *Threads*).
+`-Z build-std` also compiles `std`, whose own dependencies (`object`,
+`addr2line`, `compiler_builtins`, `dlmalloc`, `wasi*`, …) are pinned by
+rust-src's lockfile rather than `Cargo.lock`. `scripts/fetch_std_crates.py`
+vendors exactly those versions into the same directory, and
+`scripts/build_web.sh` runs it before the threaded build; without them that
+step fails with `no matching package named object found` and the page falls
+back to the single-threaded module.
+
+## Building it from a blank machine
+
+Everything below assumes no toolchain at all. On Windows do it inside WSL2
+(Ubuntu): the build and the scripts are bash and Python.
+
+```sh
+# 1. System packages. macOS: brew install python3 git xz.
+sudo apt update && sudo apt install -y build-essential curl git python3 xz-utils
+
+# 2. Rust: stable builds the fallback module, nightly + rust-src the threaded one.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+rustup toolchain install stable nightly
+rustup target add wasm32-unknown-unknown
+rustup target add wasm32-unknown-unknown --toolchain nightly
+rustup component add rust-src --toolchain nightly
+
+# 3. Vendor every crate (~800 MB in /tmp/horizon-vendor, the directory
+#    .cargo/config.toml points at; change both if you want another one).
+python3 scripts/fetch_crates.py
+python3 scripts/fetch_extra_crates.py
+python3 scripts/assemble_vendor.py
+
+# 4. Build both modules into public/ (~15 min the first time).
+scripts/build_web.sh "$HOME/.cargo"
+```
+
+Step 4 also vendors `std`'s own crates through `scripts/fetch_std_crates.py`.
+The resource pack cannot be built from nothing: it comes from a prepared
+install (step 5 of *How it is built*). On Linux one can be made from the
+release archive in this repository's root:
+
+```sh
+mkdir -p ~/horizon-native && cd ~/horizon-native
+tar -xJf /path/to/mc-rust/horizon-complete-linux-x86_64.tar.xz
+cd horizon-game/data_payload-game
+# Needs Minecraft Java Edition 26.3 played once and a Java 25 runtime.
+./horizon-prepare --prepare --server-jar ~/Downloads/server.jar --root ./resources
+```
+
+Then pack that folder and serve:
+
+```sh
+cd /path/to/mc-rust
+python3 scripts/pack_vfs.py ~/horizon-native/horizon-game/data_payload-game/resources \
+  ~/horizon-native/horizon-game/data_payload-game/.horizon-cache public/horizon-vfs.bin
+python3 scripts/serve_web.py 5173     # http://localhost:5173/
+```
 
 ## Known limitations
 
@@ -88,59 +156,63 @@ and copies the glue into `public/`.
   is far faster. The FPS readout reflects that.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
-- The build is single-threaded (see *Threads* above): terrain streams in on the
-  render thread, so walking into unloaded chunks costs frames.
+- The threaded module needs a nightly toolchain with `rust-src`
+  (`-Z build-std`) and a cross-origin isolated page. Without either, the page
+  builds and runs the single-threaded module, and terrain streams in on the
+  render thread: walking into unloaded chunks costs frames.
 - The autosave runs every 200 ticks (ten seconds) in the browser instead of
   vanilla's 6000, because a page can be closed or navigated away from between
   saves. Hiding the page also asks the game for an immediate save, and the page
   mirrors its files to IndexedDB every three seconds and when it unloads, so a
   reload lands on the position the player left.
 
-## Threads (single-threaded today)
+## Threads
 
-The browser build runs on one thread. The desktop client generates, lights and
-meshes chunks on a pool of worker threads, loads its resources in parallel and
-builds a world on its own thread; the web build does all of that on the thread
-that also draws. The cost is not the steady frame (a still scene is fine) but
-the edges:
+The threaded web build runs chunk generation, lighting and meshing on the
+page's Web Workers, so a frame does not pay for them: `Streaming`'s pool
+(`crates/horizon-client-render/src/streaming.rs`) hands its jobs to the page's
+workers instead of running them on the render thread, and the render thread
+only collects what finished. On the desktop the same pool is a set of OS
+threads; nothing else about streaming changes.
 
-- `Streaming::pump_inline` spends up to 24 ms per frame generating and meshing
-  while a world loads and 10 ms otherwise (`horizon-client-render/src/streaming.rs`),
-  out of a 16.7 ms frame;
-- `load_resources` uses one thread (`game.rs`), so the first load reads
-  thousands of textures and models serially;
-- `WorldLoader` runs its prepare step inline (`game/world_loading.rs`);
-- `par::par_map` maps serially (`horizon-client-render/src/par.rs`).
+The page loads the threaded module when it is built and the page is
+cross-origin isolated (`crossOriginIsolated`, which `serve_web.py` provides
+with its COOP/COEP headers). Otherwise it loads the single-threaded module,
+which behaves as before: jobs run on the frame, up to 24 ms of each frame while
+a world loads and 10 ms otherwise.
 
-These are `#[cfg(target_arch = "wasm32")]` branches, and they are not there to
-be conservative: `std::thread` does not work on `wasm32-unknown-unknown` at all.
-Its platform layer is `library/std/src/sys/pal/wasm/mod.rs`, which is
-`#[path = "../unsupported/common.rs"]` — every OS call is a stub that returns
-`Unsupported`, which is where the "operation not supported on this platform"
-messages come from. There is no `Thread` behind `std::thread::spawn` to enable.
+Real threads need three things, and the build and page provide all three:
 
-Real threads need three things:
+1. **A standard library built with atomics.** `std::thread::spawn` panics on
+   `wasm32-unknown-unknown` with or without them — its `Thread::new` returns
+   `Unsupported` because the module cannot create a Web Worker — but the
+   synchronisation primitives become real: `Mutex`, `Condvar`, `Once` and
+   `thread::sleep` wait on `memory.atomic.wait32`. So the module is built with
+   nightly `-Z build-std=std,panic_abort` and
+   `RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals'`.
+2. **A worker pool, because std cannot create one.** `public/threads.js` starts
+   N module workers; each imports the glue, calls
+   `initSync({ module, memory })` with the page's compiled module and its
+   memory, and enters `horizon_web_thread_worker`. That counts the worker into
+   `horizon_threads`' pool and runs `worker_main`, which takes closures from one
+   shared queue forever (`crates/horizon-threads/src/lib.rs`).
+3. **Shared memory.** The module imports its memory (`--import-memory`,
+   `--shared-memory`, `--max-memory` and the `__tls_*` exports wasm-bindgen's
+   thread transform needs), wasm-bindgen gives each worker instance its own
+   stack and thread-locals in it, and every static — the job queue, the world,
+   the VFS — is shared. That is why the streamer's existing `Shared` queue
+   (mutex, condvar, mailbox) works unchanged on the other side.
 
-1. **A standard library built with atomics.** Rust ships `wasm32-unknown-unknown`
-   without them, so the module has to be built with nightly
-   `-Z build-std=std,panic_abort` and
-   `RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals'`, plus
-   `-C link-arg=--import-memory -C link-arg=--shared-memory` so every instance
-   shares one `SharedArrayBuffer`. `wasm-bindgen` then rewrites the module for
-   threads by itself (it detects the shared, imported memory).
-2. **A worker pool**, because std will not spawn one: N Web Workers, each
-   instantiating the same module with the same memory and entering a Rust entry
-   point that runs the job loop. That is what the `wasm_thread` and
-   `wasm-bindgen-rayon` crates do; the chunk streamer's existing `Shared` job
-   queue (mutex + condvar + mailbox) would work unchanged on the other side,
-   since all of that state is in the shared heap.
-3. **No blocking waits on the main thread.** `Atomics.wait` is illegal there,
-   so the render thread has to keep polling (`try_recv`, as the inline path
-   already does) while only the workers block.
+The page's main thread must never park: `memory.atomic.wait32` traps there, so
+a contended `Mutex::lock` would abort the page. Locks that the frame shares
+with workers — the streamer's queue and `RwLock`, and the in-memory
+filesystem's global lock, which workers take when they load and save chunks —
+go through `horizon_core::sync` (`lock`, `read`, `write`), which spins on the
+page's main thread and parks only on workers; `horizon_threads` re-exports
+them. The mailbox polls (`try_recv`) rather than waits. Workers may block
+freely.
 
-Cross-origin isolation is already in place (`serve_web.py` sends `COOP:
-same-origin` and `COEP: require-corp`), which is what makes `SharedArrayBuffer`
-available in the first place. A threaded build cannot run without it, so the
-plan is to ship both modules and have `public/app.js` pick the threaded one
-when `crossOriginIsolated && typeof SharedArrayBuffer !== "undefined"`, and the
-single-threaded one otherwise.
+Still on the frame in the web build: resource loading (`par::par_map` maps
+serially, so the first load is still one thread), `WorldLoader`'s prepare step,
+far terrain (`lod.rs`) and the occlusion search. They are the next candidates;
+the streamer is where walking into unloaded chunks spent the frame.

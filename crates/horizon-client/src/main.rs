@@ -142,6 +142,26 @@ mod web_entry {
         crate::game::request_web_save();
     }
 
+    /// What a page worker needs to start the engine's job pool: the compiled
+    /// module and the shared memory every worker instantiates against.
+    #[wasm_bindgen]
+    pub fn horizon_web_thread_handles() -> js_sys::Array {
+        let handles = js_sys::Array::new();
+        handles.push(&wasm_bindgen::module());
+        handles.push(&wasm_bindgen::memory());
+        handles
+    }
+
+    /// Called once by each of the page's Web Workers as it starts: it counts
+    /// itself into the pool and then runs the job loop forever (it never
+    /// returns, so the worker stays out of JavaScript).
+    #[wasm_bindgen]
+    pub fn horizon_web_thread_worker() {
+        install_hooks();
+        horizon_threads::register_worker();
+        horizon_threads::worker_main();
+    }
+
     #[wasm_bindgen]
     pub async fn horizon_web_start(
         canvas_id: String,

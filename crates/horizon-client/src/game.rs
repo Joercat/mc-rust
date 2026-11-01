@@ -15063,7 +15063,7 @@ fn load_resources(
 ) -> Result<Loaded> {
     let requested_root = root.clone();
     #[cfg(target_arch = "wasm32")]
-    let threads = 1usize;
+    let threads = horizon_threads::pool_size().max(1);
     #[cfg(not(target_arch = "wasm32"))]
     let threads = settings.horizon.worker_threads();
     // Stage A: the menu bundle (atlas and panorama). With a loading screen it is
@@ -15150,7 +15150,9 @@ fn load_resources(
     };
     let load_biomes = || Biomes::load(&root).map_err(|e| e.to_string());
     let load_environment = || Environment::load(&root).map_err(|e| e.to_string());
-    let (facts, biomes, environment) = if threads > 1 {
+    // `std::thread::scope` needs a thread that may park; the page's main
+    // thread may not, so it reads these three in turn.
+    let (facts, biomes, environment) = if threads > 1 && horizon_threads::can_block() {
         std::thread::scope(|scope| {
             let facts = scope.spawn(load_facts);
             let biomes = scope.spawn(load_biomes);

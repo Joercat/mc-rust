@@ -16,6 +16,7 @@ pub mod position;
 pub mod process;
 pub mod random;
 pub mod storage;
+pub mod sync;
 pub mod text;
 pub mod ticks;
 

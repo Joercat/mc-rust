@@ -10,4 +10,6 @@
 /public/horizon-client.js
 /public/horizon-client_bg.wasm
 /public/horizon-vfs.bin
+/public/horizon-client-threaded.js
+/public/horizon-client-threaded_bg.wasm
 /public/*.gz

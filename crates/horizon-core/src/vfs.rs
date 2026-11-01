@@ -335,7 +335,7 @@ mod imp {
         let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let pack: Arc<[u8]> = Arc::from(bytes);
         let mut pos = 12usize;
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         for _ in 0..count {
             if pos + 2 > pack.len() {
                 return Err(io::Error::new(
@@ -418,7 +418,7 @@ mod imp {
     }
 
     pub fn import_persisted_file(path: &str, data: Vec<u8>, mtime_secs: u64) {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(Path::new(path));
         fs.ensure_parent_dirs(&norm);
         fs.dirs.remove(&norm);
@@ -432,7 +432,7 @@ mod imp {
     }
 
     pub fn drain_persisted_changes() -> (Vec<(String, Vec<u8>, u64)>, Vec<String>) {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let dirty: Vec<String> = fs.dirty_files.iter().cloned().collect();
         fs.dirty_files.clear();
         let deleted: Vec<String> = fs.deleted_files.iter().cloned().collect();
@@ -558,7 +558,7 @@ mod imp {
             let now = now_secs();
             self.mtime_secs = now;
             let bytes = Arc::new(self.cursor.get_ref().clone());
-            let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+            let mut fs = crate::sync::write(state());
             fs.ensure_parent_dirs(&self.norm_path);
             fs.files.insert(
                 self.norm_path.clone(),
@@ -595,7 +595,7 @@ mod imp {
         }
 
         pub fn metadata(&self) -> io::Result<Metadata> {
-            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = crate::sync::lock(&self.inner);
             Ok(Metadata {
                 is_dir: false,
                 len: guard.cursor.get_ref().len() as u64,
@@ -604,7 +604,7 @@ mod imp {
         }
 
         pub fn set_len(&self, size: u64) -> io::Result<()> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             if !guard.writable {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -617,7 +617,7 @@ mod imp {
         }
 
         pub fn sync_all(&self) -> io::Result<()> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             guard.commit()
         }
 
@@ -626,7 +626,7 @@ mod imp {
         }
 
         pub fn set_modified(&self, time: SystemTime) -> io::Result<()> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             guard.mtime_secs = time
                 .duration_since(UNIX_EPOCH)
                 .map_or(1_730_000_000, |d| d.as_secs());
@@ -657,7 +657,7 @@ mod imp {
 
     impl Read for File {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             if !guard.readable {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -670,7 +670,7 @@ mod imp {
 
     impl Write for File {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             if !guard.writable {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -687,23 +687,22 @@ mod imp {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             guard.commit()
         }
     }
 
     impl Seek for File {
         fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = crate::sync::lock(&self.inner);
             guard.cursor.seek(pos)
         }
     }
 
     impl Drop for File {
         fn drop(&mut self) {
-            if let Ok(mut guard) = self.inner.lock() {
-                let _ = guard.commit();
-            }
+            let mut guard = crate::sync::lock(&self.inner);
+            let _ = guard.commit();
         }
     }
 
@@ -754,7 +753,7 @@ mod imp {
 
         pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
             let writable = self.write || self.append;
-            let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+            let mut fs = crate::sync::write(state());
             let norm = fs.normalize(path.as_ref());
             if fs.dirs.contains(&norm) {
                 return Err(io::Error::new(io::ErrorKind::IsADirectory, norm));
@@ -808,25 +807,25 @@ mod imp {
     }
 
     pub fn exists(path: impl AsRef<Path>) -> bool {
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         let norm = fs.normalize(path.as_ref());
         fs.files.contains_key(&norm) || fs.dirs.contains(&norm)
     }
 
     pub fn is_file(path: impl AsRef<Path>) -> bool {
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         let norm = fs.normalize(path.as_ref());
         fs.files.contains_key(&norm)
     }
 
     pub fn is_dir(path: impl AsRef<Path>) -> bool {
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         let norm = fs.normalize(path.as_ref());
         fs.dirs.contains(&norm)
     }
 
     pub fn current_dir() -> io::Result<PathBuf> {
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         Ok(PathBuf::from(&fs.cwd))
     }
 
@@ -851,7 +850,7 @@ mod imp {
     }
 
     pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         let norm = fs.normalize(path.as_ref());
         if fs.files.contains_key(&norm) || fs.dirs.contains(&norm) {
             Ok(PathBuf::from(norm))
@@ -861,7 +860,7 @@ mod imp {
     }
 
     pub fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         let norm = fs.normalize(path.as_ref());
         if let Some(entry) = fs.files.get(&norm) {
             return Ok(Metadata {
@@ -893,7 +892,7 @@ mod imp {
 
     pub fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         let entry = {
-            let fs = state().read().unwrap_or_else(|e| e.into_inner());
+            let fs = crate::sync::read(state());
             let norm = fs.normalize(path.as_ref());
             fs.files.get(&norm).cloned().ok_or_else(|| not_found(&norm))?
         };
@@ -908,7 +907,7 @@ mod imp {
     pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
         let now = now_secs();
         let data = Arc::new(contents.as_ref().to_vec());
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(path.as_ref());
         if fs.dirs.contains(&norm) {
             return Err(io::Error::new(io::ErrorKind::IsADirectory, norm));
@@ -926,7 +925,7 @@ mod imp {
     }
 
     pub fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(path.as_ref());
         if fs.files.contains_key(&norm) || fs.dirs.contains(&norm) {
             return Err(already_exists(&norm));
@@ -937,7 +936,7 @@ mod imp {
     }
 
     pub fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(path.as_ref());
         if fs.files.contains_key(&norm) {
             return Err(already_exists(&norm));
@@ -948,7 +947,7 @@ mod imp {
     }
 
     pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(path.as_ref());
         if fs.files.remove(&norm).is_some() {
             fs.mark_deleted(&norm);
@@ -959,7 +958,7 @@ mod imp {
     }
 
     pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(path.as_ref());
         if !fs.dirs.contains(&norm) {
             return Err(not_found(&norm));
@@ -979,7 +978,7 @@ mod imp {
     }
 
     pub fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let norm = fs.normalize(path.as_ref());
         if !fs.dirs.contains(&norm) && !fs.files.contains_key(&norm) {
             return Err(not_found(&norm));
@@ -1008,7 +1007,7 @@ mod imp {
     }
 
     pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let src = fs.normalize(from.as_ref());
         let dst = fs.normalize(to.as_ref());
         if src == dst {
@@ -1061,7 +1060,7 @@ mod imp {
     }
 
     pub fn hard_link(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
-        let mut fs = state().write().unwrap_or_else(|e| e.into_inner());
+        let mut fs = crate::sync::write(state());
         let src = fs.normalize(original.as_ref());
         let dst = fs.normalize(link.as_ref());
         if fs.files.contains_key(&dst) || fs.dirs.contains(&dst) {
@@ -1076,7 +1075,7 @@ mod imp {
 
     pub fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
         let base_path = path.as_ref().to_path_buf();
-        let fs = state().read().unwrap_or_else(|e| e.into_inner());
+        let fs = crate::sync::read(state());
         let norm = fs.normalize(&base_path);
         if !fs.dirs.contains(&norm) {
             return Err(not_found(&norm));

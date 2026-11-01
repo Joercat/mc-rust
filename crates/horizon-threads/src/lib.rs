@@ -225,6 +225,108 @@ fn release() {
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_vendor = "apple")))]
 fn release() {}
 
+// ---------------------------------------------------------------------------
+// The browser's worker pool
+// ---------------------------------------------------------------------------
+//
+// `std::thread::spawn` panics on wasm32: its standard library has no way to
+// create a Web Worker, so `Thread::new` returns `Unsupported`. The threaded web
+// build instead has N Web Workers (one wasm instance each, one shared memory)
+// run `worker_main` forever: it takes closures from one shared queue and runs
+// them. Locks then work across them, because the queue, the closures and the
+// game's statics all live in that shared memory.
+
+/// The locks every thread uses: `horizon_core::sync` spins instead of parking
+/// on the browser's main thread, where a parked lock traps the page.
+pub use horizon_core::sync::{lock, may_block as can_block, read, set_may_block, write};
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+mod pool {
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Condvar, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    /// How many workers the page started and that are ready for jobs.
+    static POOL: AtomicUsize = AtomicUsize::new(0);
+    /// Jobs waiting for a worker, in the order they were queued.
+    static JOBS: Mutex<VecDeque<Box<dyn FnOnce() + Send>>> = Mutex::new(VecDeque::new());
+    static JOBS_READY: Condvar = Condvar::new();
+
+    /// Hand a job to the page's workers. False without a pool (the
+    /// single-threaded module, or a page that could not start one).
+    pub fn spawn_detached(f: impl FnOnce() + Send + 'static) -> bool {
+        if POOL.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        JOBS.lock().unwrap().push_back(Box::new(f));
+        JOBS_READY.notify_one();
+        true
+    }
+
+    /// How many workers the page started (0: no threaded build).
+    pub fn pool_size() -> usize {
+        POOL.load(Ordering::Relaxed)
+    }
+
+    /// A worker called in: it is ready for jobs. Called from JS before the
+    /// worker posts that it is ready, so the game sees the pool at its size.
+    pub fn register_worker() {
+        POOL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A worker's whole life: run jobs from the queue. Never returns; the
+    /// page's workers live as long as the page does.
+    pub fn worker_main() -> ! {
+        // This thread may park in a lock; the page's main thread may not.
+        horizon_core::sync::set_may_block(true);
+        loop {
+            let job = {
+                let mut jobs = JOBS.lock().unwrap();
+                loop {
+                    if let Some(job) = jobs.pop_front() {
+                        break job;
+                    }
+                    jobs = JOBS_READY.wait(jobs).unwrap();
+                }
+            };
+            job();
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+mod pool {
+    /// An OS thread where there is one; the single-threaded web build has
+    /// none, so a job that needs one simply does not run.
+    pub fn spawn_detached(f: impl FnOnce() + Send + 'static) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = f;
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::thread::Builder::new().spawn(f).is_ok()
+        }
+    }
+
+    pub fn pool_size() -> usize {
+        0
+    }
+
+    pub fn register_worker() {}
+
+    pub fn worker_main() -> ! {
+        panic!("Horizon: this build has no worker pool")
+    }
+}
+
+pub use pool::{pool_size, register_worker, spawn_detached, worker_main};
+
 #[cfg(test)]
 mod tests {
     /// The hint holds on the platforms that take it.

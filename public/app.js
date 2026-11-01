@@ -1,6 +1,8 @@
 // Horizon 26.3 web host: mounts the resource VFS pack, restores the player's
 // `/game` folder from IndexedDB, starts the real Horizon client, then keeps the
 // browser's storage in sync with the files the game writes.
+import { startThreadPool } from "./threads.js";
+
 const bootEl = document.getElementById("boot");
 const barEl = document.querySelector("#bar > i");
 const phaseEl = document.getElementById("phase");
@@ -31,20 +33,54 @@ function fail(err) {
 // has none of them. A static import would fail before a line of this file ran
 // and leave the page on "starting…" forever, so they are loaded here, where a
 // missing build can name the files it wants.
+//
+// Two engines are built: the threaded one, whose chunk workers are Web Workers
+// sharing one memory (`threads.js`), and the single-threaded one every browser
+// can run. The threaded one needs cross-origin isolation for shared memory.
 let wasm = null;
 let init = null;
-const ARTIFACTS = [
-  ["./horizon-client.js", "the wasm-bindgen glue"],
-  ["./horizon-client_bg.wasm", "the compiled client"],
-  ["./horizon-vfs.bin", "the resource pack"],
-];
+const ENGINES = {
+  threaded: {
+    glue: "./horizon-client-threaded.js",
+    wasm: "./horizon-client-threaded_bg.wasm",
+  },
+  single: {
+    glue: "./horizon-client.js",
+    wasm: "./horizon-client_bg.wasm",
+  },
+};
+
+async function present(url) {
+  try {
+    // Only a definite "no such file" counts: a host that refuses HEAD (405)
+    // must not read as a missing build.
+    const response = await fetch(url, { method: "HEAD" });
+    return response.status !== 404 && response.status !== 410;
+  } catch {
+    return false;
+  }
+}
+
+async function chooseEngine() {
+  const isolated =
+    globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
+  if (isolated && (await present(new URL(ENGINES.threaded.glue, import.meta.url)))) {
+    return { ...ENGINES.threaded, threaded: true };
+  }
+  if (isolated) say("threaded engine not built: using the single-threaded one");
+  else say("page is not cross-origin isolated: single-threaded engine");
+  return { ...ENGINES.single, threaded: false };
+}
 
 async function loadEngine() {
+  const engine = await chooseEngine();
   const missing = [];
-  for (const [path, what] of ARTIFACTS) {
+  for (const [path, what] of [
+    [engine.glue, "the wasm-bindgen glue"],
+    [engine.wasm, "the compiled client"],
+    ["./horizon-vfs.bin", "the resource pack"],
+  ]) {
     try {
-      // Only a definite "no such file" counts: a host that refuses HEAD
-      // (405) or answers with something else must not read as a missing build.
       const response = await fetch(new URL(path, import.meta.url), { method: "HEAD" });
       if (response.status === 404 || response.status === 410) {
         missing.push(`  ${path.slice(2)} — ${what} (HTTP ${response.status})`);
@@ -62,9 +98,10 @@ async function loadEngine() {
         "(needs the wasm32 Rust toolchain; see docs/WEB.md for the prerequisites)",
     );
   }
-  const module = await import("./horizon-client.js");
+  const module = await import(engine.glue);
   wasm = module;
   init = module.default;
+  return engine;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,13 +192,37 @@ async function persist(db) {
   say(`saved ${records.length} file(s), removed ${deleted.length}`);
 }
 
+/// Starts the threaded engine's workers before the game does: a streaming
+/// world takes them as its chunk workers. A failure leaves the game playable
+/// (it runs the jobs on the frame), so it is reported, not fatal.
+async function startEngineThreads(engine) {
+  if (!engine.threaded || typeof wasm.horizon_web_thread_handles !== "function") return;
+  const handles = wasm.horizon_web_thread_handles();
+  // One core left for the frame and the integrated server, as on the desktop.
+  const count = Math.max(1, Math.min((navigator.hardwareConcurrency || 4) - 1, 16));
+  try {
+    const workers = await startThreadPool({
+      module: handles[0],
+      memory: handles[1],
+      glueUrl: new URL(engine.glue, import.meta.url).href,
+      count,
+    });
+    say(`worker threads: ${workers.length}`);
+  } catch (error) {
+    say(`worker threads failed: ${error}`);
+    console.warn("[horizon] worker threads failed", error);
+  }
+}
+
 async function boot() {
   phase("looking for the engine…", 0.01);
-  await loadEngine();
+  const engine = await loadEngine();
   phase("loading engine…", 0.03);
-  const wasmUrl = new URL("./horizon-client_bg.wasm", import.meta.url);
-  await init({ module_or_path: wasmUrl });
-  say("wasm engine ready");
+  await init({ module_or_path: new URL(engine.wasm, import.meta.url) });
+  say(engine.threaded ? "wasm engine ready (threaded)" : "wasm engine ready");
+
+  phase("starting worker threads…", 0.04);
+  await startEngineThreads(engine);
 
   phase("opening browser storage…", 0.05);
   const db = await openDb();

@@ -254,12 +254,31 @@ impl Mailbox {
         self.try_lock()?.pop_front()
     }
     fn recv_timeout(&self, timeout: std::time::Duration) -> Option<Done> {
-        let done = self.done.lock().unwrap();
-        let (mut done, _) = self
-            .arrived
-            .wait_timeout_while(done, timeout, |done| done.is_empty())
-            .unwrap();
-        done.pop_front()
+        // The page's main thread may not park (`Atomic.wait` traps there): it
+        // looks at the mailbox until the deadline instead, while the workers
+        // make progress on their own threads.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            let deadline = horizon_core::time::Instant::now() + timeout;
+            loop {
+                if let Some(done) = self.try_recv() {
+                    return Some(done);
+                }
+                if horizon_core::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        {
+            let done = self.done.lock().unwrap();
+            let (mut done, _) = self
+                .arrived
+                .wait_timeout_while(done, timeout, |done| done.is_empty())
+                .unwrap();
+            done.pop_front()
+        }
     }
 }
 pub struct Streaming {
@@ -267,6 +286,9 @@ pub struct Streaming {
     light_view: Arc<dyn Fn(&Proto) -> Option<Chunk> + Send + Sync>,
     threads: Vec<thread::JoinHandle<()>>,
     inline_step: Option<Box<dyn FnMut() -> bool + Send>>,
+    /// How many jobs can run at once: OS threads, the page's Web Workers, or
+    /// 1 while jobs run inline on the frame.
+    workers: usize,
     order: u64,
     /// Ticks since the columns and protos that fell out of range were swept.
     scan_age: u8,
@@ -581,82 +603,115 @@ impl Streaming {
                 }
             })
         }
+        /// One worker's whole life: take the closest job, run it, report it.
+        /// The desktop runs it on an OS thread; the threaded page runs it on a
+        /// Web Worker (`horizon_threads::worker_main`).
+        fn run_worker<G: ChunkGenerator>(
+            generator: Arc<G>,
+            shared: Arc<Shared>,
+            light: Arc<LightTables>,
+        ) {
+            horizon_threads::behind_server();
+            let mut worker = generator.worker();
+            let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
+            loop {
+                let job = {
+                    let mut queue = horizon_threads::lock(&shared.queue);
+                    loop {
+                        if shared.stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if let Some(job) = queue.pop() {
+                            break job.job;
+                        }
+                        queue = shared.ready.wait(queue).unwrap();
+                    }
+                };
+                if let Some(done) = execute_job(
+                    job,
+                    &*generator,
+                    &mut worker,
+                    &shared,
+                    &light,
+                    &mut faces,
+                ) {
+                    shared.done.send(done);
+                }
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        let (threads, inline_step): (
+        let (threads, inline_step, workers): (
             Vec<thread::JoinHandle<()>>,
             Option<Box<dyn FnMut() -> bool + Send>>,
+            usize,
         ) = (
             (0..threads.max(1))
                 .map(|i| {
-                    let shared = shared.clone();
-                    let generator = generator.clone();
-                    let light = context.light.clone();
+                    let (generator, shared, light) =
+                        (generator.clone(), shared.clone(), context.light.clone());
                     thread::Builder::new()
                         .name(format!("horizon-worker-{i}"))
-                        .spawn(move || {
-                            horizon_threads::behind_server();
-                            let mut worker = generator.worker();
-                            let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
-                            loop {
-                                let job = {
-                                    let mut queue = shared.queue.lock().unwrap();
-                                    loop {
-                                        if shared.stop.load(Ordering::Relaxed) {
-                                            return;
-                                        }
-                                        if let Some(job) = queue.pop() {
-                                            break job.job;
-                                        }
-                                        queue = shared.ready.wait(queue).unwrap();
-                                    }
-                                };
-                                if let Some(done) = execute_job(
-                                    job,
-                                    &*generator,
-                                    &mut worker,
-                                    &shared,
-                                    &light,
-                                    &mut faces,
-                                ) {
-                                    shared.done.send(done);
-                                }
-                            }
-                        })
+                        .spawn(move || run_worker(generator, shared, light))
                         .expect("spawn worker")
                 })
                 .collect(),
             None,
+            threads.max(1),
         );
         #[cfg(target_arch = "wasm32")]
-        let (threads, inline_step): (
+        let (threads, inline_step, workers): (
             Vec<thread::JoinHandle<()>>,
             Option<Box<dyn FnMut() -> bool + Send>>,
+            usize,
         ) = {
-            let _ = threads;
-            let shared_cl = shared.clone();
-            let gen_cl = generator.clone();
-            let light_cl = context.light.clone();
-            let mut worker = gen_cl.worker();
-            let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
-            (
-                Vec::new(),
-                Some(Box::new(move || -> bool {
-                    let Some(queued) = shared_cl.queue.lock().unwrap().pop() else {
-                        return false;
-                    };
-                    if let Some(done) = execute_job(
-                        queued.job,
-                        &*gen_cl,
-                        &mut worker,
-                        &shared_cl,
-                        &light_cl,
-                        &mut faces,
-                    ) {
-                        shared_cl.done.send(done);
-                    }
-                    true
-                })),
-            )
+            // A threaded page hands the jobs to its Web Workers, one job at a
+            // time each, on other threads while the frame keeps drawing. A
+            // streamer that asked for one worker (the title screen's, a
+            // server's) stays inline: it would hold a whole page thread for a
+            // job at a time.
+            let pool = if threads > 1 {
+                horizon_threads::pool_size().min(threads)
+            } else {
+                0
+            };
+            let mut started = 0;
+            while started < pool {
+                let (generator, shared, light) =
+                    (generator.clone(), shared.clone(), context.light.clone());
+                if !horizon_threads::spawn_detached(move || run_worker(generator, shared, light)) {
+                    break;
+                }
+                started += 1;
+            }
+            if started > 0 {
+                (Vec::new(), None, started)
+            } else {
+                let shared_cl = shared.clone();
+                let gen_cl = generator.clone();
+                let light_cl = context.light.clone();
+                let mut worker = gen_cl.worker();
+                let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
+                (
+                    Vec::new(),
+                    Some(Box::new(move || -> bool {
+                        let Some(queued) = horizon_threads::lock(&shared_cl.queue).pop() else {
+                            return false;
+                        };
+                        if let Some(done) = execute_job(
+                            queued.job,
+                            &*gen_cl,
+                            &mut worker,
+                            &shared_cl,
+                            &light_cl,
+                            &mut faces,
+                        ) {
+                            shared_cl.done.send(done);
+                        }
+                        true
+                    })),
+                    1,
+                )
+            }
         };
         let light_view = {
             let generator = generator.clone();
@@ -667,6 +722,7 @@ impl Streaming {
             light_view,
             threads,
             inline_step,
+            workers,
             order: 0,
             scan_age: 0,
             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
@@ -725,7 +781,7 @@ impl Streaming {
     /// models and sprites, and rebuild every loaded section. Meshes in flight
     /// were made with the old resources; their results are dropped.
     pub fn reload_resources(&mut self, world: &mut World, context: Arc<WorkerContext>) {
-        *self.shared.context.write().unwrap() = context;
+        *horizon_threads::write(&self.shared.context) = context;
         self.meshing.clear();
         for &(x, z) in world.chunks.keys() {
             if self.lit.contains(&(x, z)) {
@@ -801,7 +857,7 @@ impl Streaming {
     fn submit(&mut self, at: Option<(i32, i32)>, bias: i64, job: Job) {
         self.order += 1;
         let priority = at.map_or(i64::MIN, |(x, z)| self.distance(x, z) * 4 + bias);
-        self.shared.queue.lock().unwrap().push(Queued {
+        horizon_threads::lock(&self.shared.queue).push(Queued {
             priority,
             at,
             bias,
@@ -825,7 +881,7 @@ impl Streaming {
             return;
         }
         self.queue_basis = (basis, self.extra.clone());
-        let mut queue = self.shared.queue.lock().unwrap();
+        let mut queue = horizon_threads::lock(&self.shared.queue);
         rank_again(&mut queue, |x, z| self.distance(x, z));
     }
     fn receive_decorated(&mut self, x: i32, z: i32, region: [Proto; 9]) {
@@ -994,7 +1050,7 @@ impl Streaming {
         self.meshing.contains_key(&section)
     }
     pub fn pending(&self) -> usize {
-        self.shared.queue.lock().unwrap().len()
+        horizon_threads::lock(&self.shared.queue).len()
     }
     /// Whether any chunk is queued or on its way from generation to a mesh.
     pub fn busy(&self) -> bool {
@@ -1219,8 +1275,7 @@ impl Streaming {
         // Decorate chunks whose 3x3 proto neighbourhood is available, in
         // vanilla's order: decoration is order dependent where write regions
         // overlap (see `DecorationOrder`).
-        // A browser runs the jobs inline, so the in-flight budgets still hold.
-        let workers = self.threads.len().max(usize::from(self.inline_step.is_some()));
+        let workers = self.workers;
         if self.decorates && self.order_area != Some((self.center, self.radius)) {
             let (decorated, chunks) = (&self.decorated, &world.chunks);
             // The render distance is the server view distance in singleplayer.
@@ -1716,15 +1771,17 @@ impl Streaming {
             "meshing": self.meshing.len(),
             "meshed": self.meshed.len(),
             "saving": self.saving,
-            "queue": self.shared.queue.lock().map(|q| q.len()).unwrap_or(0),
+            "queue": horizon_threads::lock(&self.shared.queue).len(),
             "inline": self.inline_step.is_some(),
             "exhausted": self.generation_scan.exhausted,
         })
     }
     pub fn wait(&mut self, timeout: std::time::Duration) {
-        if self.inline_step.is_some() {
+        // The page's main thread may not park (an `Atomic.wait` there traps),
+        // so it looks at what arrived instead of waiting for more.
+        if self.inline_step.is_some() || !horizon_threads::can_block() {
             self.pump_inline(timeout);
-            if let Some(done) = self.shared.done.try_recv() {
+            while let Some(done) = self.shared.done.try_recv() {
                 self.deferred.push(done);
             }
             return;
