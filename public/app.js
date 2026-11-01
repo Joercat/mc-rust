@@ -8,6 +8,7 @@ const barEl = document.querySelector("#bar > i");
 const phaseEl = document.getElementById("phase");
 const logEl = document.getElementById("log");
 const canvasEl = document.getElementById("horizon-canvas");
+
 const errorEl = document.getElementById("error");
 
 const logLines = [];
@@ -42,7 +43,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.4";
+const BUILD = "2026-11-01.5";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -320,7 +321,7 @@ async function boot() {
   // A Chromebook's top row sends Back, Refresh, Fullscreen and the volume and
   // brightness keys, not F1-F12, unless "Use the top row keys as function
   // keys" is on. The Alt aliases below are the same keys on every keyboard.
-  say("F1 HUD · F2 screenshot · F3 debug · F5 camera (ChromeOS: Alt+1/2/3/5, Alt+0 fullscreen)");
+  say("F1 HUD · F2 screenshot · F3 debug · F5 camera (ChromeOS: hold F + 1/2/3/5, F + 0 fullscreen)");
   bootEl.classList.add("hidden");
   canvasEl.focus();
   running = true;
@@ -390,14 +391,25 @@ window.addEventListener(
 // other keyboards) can report F1-F12 with a code the engine does not know, or
 // not deliver them at all: F3 then opens the browser's find bar instead of the
 // debug screen. Dispatching on the canvas, where winit listens, gives the
-// engine one event with both `key` and `code` set. Alt plus a digit is the
-// fallback for a machine whose top row never sends the key itself, which is
-// what a Chromebook does until "Use the top row keys as function keys" is on.
-const FUNCTION_ALIASES = new Map([
+// engine one event with both `key` and `code` set.
+//
+// A top row that never sends the key has no F to press, so the letter F is the
+// modifier: hold it (or tap it) and press a digit, and the digit becomes the
+// function key — F+3 is F3, F+0 is fullscreen. The digit is stopped before the
+// game sees it, or it would also pick a hotbar slot; the F itself is left
+// alone, as the game may bind it.
+const FUNCTION_DIGITS = new Map([
   ["Digit1", "F1"],
   ["Digit2", "F2"],
   ["Digit3", "F3"],
+  ["Digit4", "F4"],
   ["Digit5", "F5"],
+  ["Digit6", "F6"],
+  ["Digit7", "F7"],
+  ["Digit8", "F8"],
+  ["Digit9", "F9"],
+  // F10 is unbound, and fullscreen (F11) needs a key that exists on the top
+  // row's replacement layout.
   ["Digit0", "F11"],
 ]);
 let synthesizing = false;
@@ -419,22 +431,39 @@ const isFunctionKey = (key) => /^F([1-9]|1[0-2])$/.test(key) && key !== "F12";
 const isTyping = (target) =>
   target instanceof HTMLElement &&
   (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+const isF = (event) => event.code === "KeyF" || event.key === "f" || event.key === "F";
+let fHeld = false;
+let fPressedAt = 0;
+let lastEscapeAt = 0;
+// A tap of F still counts for half a second after its release, which is enough
+// to hit a digit and short enough not to eat ordinary hotbar keys.
+const F_GRACE_MS = 500;
+const fArmed = () => fHeld || performance.now() - fPressedAt < F_GRACE_MS;
 window.addEventListener(
   "keydown",
   (event) => {
     if (!running || synthesizing || isTyping(event.target)) return;
+    if (event.key === "Escape") lastEscapeAt = performance.now();
     if (isFunctionKey(event.key)) {
       event.preventDefault();
       event.stopPropagation();
       if (!event.repeat) sendKey(event.key);
       return;
     }
-    if (!event.altKey || event.ctrlKey || event.metaKey) return;
-    const key = FUNCTION_ALIASES.get(event.code);
-    if (!key) return;
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (isF(event)) {
+      fHeld = true;
+      fPressedAt = performance.now();
+      return;
+    }
+    const key = FUNCTION_DIGITS.get(event.code);
+    if (!key || !fArmed()) return;
     event.preventDefault();
     event.stopPropagation();
-    sendKey(key);
+    if (!event.repeat) {
+      fPressedAt = 0;
+      sendKey(key);
+    }
   },
   { capture: true },
 );
@@ -444,15 +473,49 @@ window.addEventListener(
   "keyup",
   (event) => {
     if (!running || synthesizing || isTyping(event.target)) return;
-    const aliased =
-      event.altKey && !event.ctrlKey && !event.metaKey && FUNCTION_ALIASES.has(event.code);
-    if (isFunctionKey(event.key) || aliased) {
+    if (isFunctionKey(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (isF(event)) {
+      fHeld = false;
+      fPressedAt = performance.now();
+      return;
+    }
+    if (FUNCTION_DIGITS.has(event.code) && fArmed()) {
       event.preventDefault();
       event.stopPropagation();
     }
   },
   { capture: true },
 );
+
+// Escape is swallowed by the browser to release the pointer, so the game never
+// sees the press that closed it and the pause menu takes a second Escape. When
+// the capture ends while the world is running, send the Escape the game missed.
+// The delay lets a game that did see the key report its own pause first.
+document.addEventListener("pointerlockchange", () => {
+  if (!running || document.pointerLockElement) return;
+  setTimeout(() => {
+    if (!running || document.pointerLockElement) return;
+    // The game saw the key itself if the page got the press; only the browser
+    // eating it leaves this handler as the one that must act.
+    if (performance.now() - lastEscapeAt < 500) return;
+    let status = {};
+    try {
+      status = JSON.parse(
+        (wasm && wasm.horizon_web_status && wasm.horizon_web_status()) ||
+          window.__horizon_status ||
+          "{}",
+      );
+    } catch (error) {
+      return;
+    }
+    if (status.state !== "playing" || status.pause) return;
+    sendKey("Escape");
+  }, 200);
+});
 
 window.addEventListener("error", (event) => {
   console.error("[horizon] uncaught:", event.error && event.error.stack ? event.error.stack : event.message);
@@ -461,9 +524,14 @@ window.addEventListener("error", (event) => {
 window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
   // A policy answer, not a crash: Chrome rejects `requestPointerLock` when no
-  // user gesture is live, and winit's web backend drops that promise. The game
-  // takes the pointer on the next click, so say so and keep running.
-  if (reason && reason.name === "SecurityError" && /pointer lock/i.test(reason.message)) {
+  // user gesture is live (SecurityError, or NotAllowedError on newer builds),
+  // and winit's web backend drops that promise. The game takes the pointer on
+  // the next click, so say so and keep running.
+  if (
+    reason &&
+    (reason.name === "SecurityError" || reason.name === "NotAllowedError") &&
+    /pointer lock/i.test(String(reason.message || ""))
+  ) {
     say(`pointer lock refused: ${reason.message}`);
     return;
   }
