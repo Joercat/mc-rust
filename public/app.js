@@ -289,6 +289,7 @@ async function boot() {
   bootEl.classList.add("hidden");
   hudEl.style.opacity = "1";
   document.getElementById("horizon-canvas").focus();
+  running = true;
 
   // Save what the game writes, and show a small status readout. `?persist=0`
   // and `?status=0` turn either off: the boot probes use them to tell a
@@ -327,6 +328,32 @@ async function boot() {
     }
   }, 500);
 }
+
+// The browser owns most function keys: F1 opens its help, F3 find, F5 reloads
+// the page (the client cycles the camera on it), F11 its own fullscreen, and
+// Tab moves focus instead of opening the player list. Once the game runs, the
+// keys it binds have to reach winit, so they are taken from the browser here.
+// F12 stays the browser's: closing the devtools would leave a player stuck.
+const GAME_KEYS = new Set([
+  "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11",
+  "Tab", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+]);
+let running = false;
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (!running) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLElement &&
+      (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+    ) {
+      return;
+    }
+    if (GAME_KEYS.has(event.key) || GAME_KEYS.has(event.code)) event.preventDefault();
+  },
+  { capture: true },
+);
 
 window.addEventListener("error", (event) => {
   console.error("[horizon] uncaught:", event.error && event.error.stack ? event.error.stack : event.message);

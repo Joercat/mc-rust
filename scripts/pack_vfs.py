@@ -5,8 +5,11 @@ into a single `HZVFS001` virtual filesystem archive (`public/horizon-vfs.bin`).
 """
 import gzip
 import os
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 
 MAGIC = b"HZVFS001"
 FLAG_RAW = 0
@@ -41,11 +44,27 @@ def fail(message):
 
 
 def main():
-    if len(sys.argv) != 4:
-        fail("usage: pack_vfs.py RESOURCES_DIR CACHE_DIR OUT_PATH")
-    res_dir = sys.argv[1]
-    cache_dir = sys.argv[2]
-    out_path = sys.argv[3]
+    args = sys.argv[1:]
+    audio_bitrate = None
+    audio_long_bitrate = None
+    positional = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--audio-bitrate" and i + 1 < len(args):
+            i += 1
+            audio_bitrate = args[i]
+        elif args[i] == "--audio-long-bitrate" and i + 1 < len(args):
+            i += 1
+            audio_long_bitrate = args[i]
+        else:
+            positional.append(args[i])
+        i += 1
+    if len(positional) != 3:
+        fail(
+            "usage: pack_vfs.py RESOURCES_DIR CACHE_DIR OUT_PATH "
+            "[--audio-bitrate 64k] [--audio-long-bitrate 96k]"
+        )
+    res_dir, cache_dir, out_path = positional
 
     # An empty pack "succeeds" and then the page cannot load anything, which is
     # much harder to diagnose than a refusal here. The game itself requires the
@@ -67,6 +86,26 @@ def main():
         )
     if not os.path.isdir(cache_dir):
         print(f"pack_vfs.py: {cache_dir} is not a directory; packing no cache", file=sys.stderr)
+
+    # The sound library dominates the pack, and Vorbis at 64 kbit/s is
+    # transparent for one-shot effects. Re-encode into a scratch copy so the
+    # prepared install the launcher uses keeps its full-quality audio.
+    audio_scratch = None
+    if audio_bitrate:
+        audio_scratch = tempfile.mkdtemp(prefix="horizon-audio-")
+        cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "compress_audio.py"),
+            res_dir,
+            audio_scratch,
+            "--bitrate",
+            audio_bitrate,
+        ]
+        if audio_long_bitrate:
+            cmd += ["--long-bitrate", audio_long_bitrate]
+        print("pack_vfs.py: " + " ".join(cmd), file=sys.stderr)
+        subprocess.run(cmd, check=True)
+        res_dir = audio_scratch
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -117,6 +156,9 @@ def main():
         for _, _, _, _, payload in prepared_entries:
             if payload:
                 f.write(payload)
+
+    if audio_scratch:
+        shutil.rmtree(audio_scratch, ignore_errors=True)
 
     total_out = os.path.getsize(out_path)
     print(
