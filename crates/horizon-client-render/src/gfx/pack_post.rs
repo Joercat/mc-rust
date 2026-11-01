@@ -1838,7 +1838,7 @@ impl PackPost {
                     if pass.draw {
                         rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);
                     }
-                    rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
+                    rp.draw_indexed(d.base / 4 * 6..d.base / 4 * 6 + d.quads * 6, 0, 0..1);
                 }
             }
             self.mips_valid &= !pass.written;
@@ -1880,7 +1880,7 @@ impl PackPost {
                 if pass.draw {
                     rp.set_bind_group(2, &geometry.group, &[geometry.offset(d.slot)]);
                 }
-                rp.draw_indexed(0..d.quads * 6, d.base as i32, 0..1);
+                rp.draw_indexed(d.base / 4 * 6..d.base / 4 * 6 + d.quads * 6, 0, 0..1);
             }
         }
         self.entities = Some(entities);

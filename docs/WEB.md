@@ -180,10 +180,13 @@ files at all, the page stops with the same message the desktop client gives.
 
 ## Known limitations
 
-- The renderer needs **WebGPU** (Chrome/Edge 113+, Safari 26, Firefox with
-  `dom.webgpu.enabled`). The WebGL2 fallback (`?backend=webgl`) only works
-  when the browser has `WEBGL_draw_instanced_base_vertex_base_instance`;
-  otherwise the page says so before starting instead of panicking mid-world.
+- The renderer prefers **WebGPU** (Chrome/Edge 113+, Safari 26, Firefox with
+  `dom.webgpu.enabled`), and `app.js` selects WebGL2 itself (it rewrites the
+  URL to `?backend=webgl`) when the browser has no adapter — ChromeOS devices
+  without a Vulkan driver, for instance. Nothing in the renderer needs
+  `WEBGL_draw_instanced_base_vertex_base_instance`: sections bind their arena
+  and origin slices instead of using a base vertex or first instance, and the
+  quad passes draw index ranges.
 - Software WebGPU (SwiftShader) renders a frame in ~300 ms; a real GPU adapter
   is far faster. The FPS readout reflects that.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
