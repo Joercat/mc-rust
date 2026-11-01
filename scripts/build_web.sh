@@ -78,8 +78,18 @@ NIGHTLY_HINT="rustup toolchain install $NIGHTLY -c rust-src -t wasm32-unknown-un
 # every std dependency then fails with `error[E0152]: duplicate lang item in
 # crate core`. Keying the directory by the compiler's version means such an
 # artifact cannot be reached at all, so no stamp or wipe can be forgotten.
+# The key covers the compiler *and* the sysroot `core` it ships: reinstalling or
+# repairing a toolchain keeps its version string, and artefacts built against
+# the old sysroot must not be reachable from the repaired one.
+thread_key_for() {
+  local sysroot core
+  sysroot="$(rustc +"$1" --print sysroot 2>/dev/null || true)"
+  core="$(ls "$sysroot"/lib/rustlib/wasm32-unknown-unknown/lib/libcore-*.rmeta 2>/dev/null | head -1)"
+  printf '%s %s' "$2" "$(sha256sum "$core" 2>/dev/null | cut -c1-16)" | sha256sum | cut -c1-8
+}
+
 THREAD_VERSION="$(rustc +"$NIGHTLY" --version 2>/dev/null || echo unknown)"
-THREAD_KEY="$(printf '%s' "$THREAD_VERSION" | sha256sum | cut -c1-8)"
+THREAD_KEY="$(thread_key_for "$NIGHTLY" "$THREAD_VERSION")"
 THREAD_TARGET_DIR="$THREADS_DIR_ROOT/$THREAD_KEY"
 mkdir -p "$THREADS_DIR_ROOT"
 
@@ -222,7 +232,7 @@ if [ "$threads_failed" -ne 0 ] && [ -z "${HORIZON_NIGHTLY:-}" ] \
     NIGHTLY="$ALT"
     NIGHTLY_HINT="rustup toolchain install $ALT -c rust-src -t wasm32-unknown-unknown"
     THREAD_VERSION="$(rustc +"$ALT" --version 2>/dev/null || echo unknown)"
-    THREAD_KEY="$(printf '%s' "$THREAD_VERSION" | sha256sum | cut -c1-8)"
+    THREAD_KEY="$(thread_key_for "$ALT" "$THREAD_VERSION")"
     THREAD_TARGET_DIR="$THREADS_DIR_ROOT/$THREAD_KEY"
     python3 scripts/fetch_std_crates.py "$VENDOR_DIR" "$ALT" || continue
     mkdir -p "$THREAD_TARGET_DIR"
