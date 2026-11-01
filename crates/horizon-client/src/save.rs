@@ -1811,7 +1811,7 @@ fn compress_records(
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut done: Vec<(usize, std::io::Result<Option<ChunkRecord>>)> =
         std::thread::scope(|scope| {
-            let threads: Vec<_> = (0..helpers)
+            let threads: Vec<_> = (0..if horizon_core::sync::may_block() { helpers } else { 0 })
                 .map(|_| {
                     scope.spawn(|| {
                         let mut out = Vec::new();
@@ -1830,6 +1830,10 @@ fn compress_records(
                 .flat_map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
                 .collect()
         });
+    if done.len() != records.len() {
+        // Nothing was shared out: compress on this thread instead.
+        return records.iter().map(|(_, record)| compress(record)).collect();
+    }
     done.sort_unstable_by_key(|(i, _)| *i);
     done.into_iter().map(|(_, r)| r).collect()
 }

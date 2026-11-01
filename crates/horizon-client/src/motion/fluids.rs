@@ -255,12 +255,7 @@ impl MotionWorld<'_, '_, '_> {
             return Ok(false);
         }
         let resources = self.resources;
-        let shape = resources
-            .fluids
-            .shapes
-            .lock()
-            .map_err(|_| "fluid shape cache poisoned")?
-            .shape(self, fluid, p)?;
+        let shape = horizon_core::sync::lock(&resources.fluids.shapes).shape(self, fluid, p)?;
         Ok(shape.clip(from, to, p).is_some())
     }
 }

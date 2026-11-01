@@ -149,7 +149,7 @@ struct ResourceIds {
 static RESOURCE_IDS: Mutex<Vec<(PathBuf, Arc<ResourceIds>)>> = Mutex::new(Vec::new());
 
 fn resource_ids(root: &Path) -> Arc<ResourceIds> {
-    let mut cache = RESOURCE_IDS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = horizon_core::sync::lock(&RESOURCE_IDS);
     if let Some((_, ids)) = cache.iter().find(|(cached, _)| cached == root) {
         return ids.clone();
     }

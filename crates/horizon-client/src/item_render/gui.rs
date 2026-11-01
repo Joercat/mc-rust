@@ -147,11 +147,7 @@ pub fn draw(
     // take them instead of submitting, sorting and clipping its quads again.
     let key = DrawnKey::of(state, renderer, sprites, x, y);
     if let Some(key) = &key
-        && let Some(drawn) = renderer
-            .gui_drawn
-            .lock()
-            .ok()
-            .and_then(|d| d.get(key).cloned())
+        && let Some(drawn) = horizon_core::sync::lock(&renderer.gui_drawn).get(key).cloned()
     {
         batch.vertices.extend_from_slice(&drawn);
         return;
@@ -169,9 +165,8 @@ pub fn draw(
         glint_speed,
         glint_alpha,
     );
-    if let Some(key) = key
-        && let Ok(mut drawn) = renderer.gui_drawn.lock()
-    {
+    if let Some(key) = key {
+        let mut drawn = horizon_core::sync::lock(&renderer.gui_drawn);
         // GUI positions and items are few; a long scroll through every tab stays bounded.
         if drawn.len() >= DRAWN_LIMIT {
             drawn.clear();

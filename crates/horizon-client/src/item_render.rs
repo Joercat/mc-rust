@@ -350,7 +350,7 @@ fn argb_pixels(rgba: &[u8]) -> Vec<u32> {
 }
 impl FileSprites {
     fn translucent(&self, sprite: &str) -> bool {
-        let known = |this: &Self| this.translucent.lock().ok()?.get(sprite).copied();
+        let known = |this: &Self| horizon_core::sync::lock(&this.translucent).get(sprite).copied();
         known(self).unwrap_or_else(|| {
             self.mask(sprite);
             known(self).unwrap_or(false)

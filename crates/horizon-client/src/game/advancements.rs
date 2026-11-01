@@ -256,7 +256,7 @@ impl Game<'_> {
     /// The advancement tree, loaded once.
     pub(super) fn advancement_tree(&mut self) -> Arc<Tree> {
         if self.adv.tree.list.is_empty() {
-            let tree = match self.adv.pending_tree.take().map(|h| h.join()) {
+            let tree = match self.adv.pending_tree.take().map(horizon_core::sync::join) {
                 Some(Ok(tree)) => tree,
                 _ => Tree::load(&self.options.resources.join("data")),
             };

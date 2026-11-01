@@ -9806,7 +9806,7 @@ impl Game<'_> {
         while self.pending_save.is_some() {
             self.poll_closing_save()?;
             if self.pending_save.is_some() {
-                std::thread::sleep(Duration::from_millis(1));
+                horizon_core::sync::sleep(Duration::from_millis(1));
             }
         }
         if self.title.is_some() || self.saved_for_exit {
@@ -14967,7 +14967,7 @@ impl Game<'_> {
             while self.rest_loader.is_some() {
                 self.poll_world_rest()?;
                 if self.rest_loader.is_some() {
-                    std::thread::sleep(Duration::from_millis(10));
+                    horizon_core::sync::sleep(Duration::from_millis(10));
                 }
             }
             log::info!(
@@ -16753,7 +16753,7 @@ mod tests {
         assert!(!loader.ready().unwrap());
         release.send(()).unwrap();
         while !loader.ready().unwrap() {
-            std::thread::sleep(Duration::from_millis(1));
+            horizon_core::sync::sleep(Duration::from_millis(1));
         }
         loader.finish().unwrap();
     }

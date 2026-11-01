@@ -204,7 +204,7 @@ impl Game<'_> {
             }
             return;
         };
-        let received = r.session.counters.lock().unwrap().as_ref().map(|c| {
+        let received = horizon_core::sync::lock(&r.session.counters).as_ref().map(|c| {
             let order = std::sync::atomic::Ordering::Relaxed;
             [
                 c.bytes_in.load(order),

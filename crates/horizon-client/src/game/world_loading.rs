@@ -285,7 +285,7 @@ pub(super) fn preload_world_data(
         let _ = (on_world_screens, resources, registry);
         return;
     }
-    let mut preload = PRELOAD.lock().unwrap_or_else(|e| e.into_inner());
+    let mut preload = horizon_core::sync::lock(&PRELOAD);
     match &mut *preload {
         Preload::Used => {}
         Preload::Idle if on_world_screens => {
@@ -329,7 +329,7 @@ pub(super) fn preload_world_data(
 
 /// A world opens: what `preload_world_data` read is the world's from now on.
 pub(super) fn world_data_used() {
-    *PRELOAD.lock().unwrap_or_else(|e| e.into_inner()) = Preload::Used;
+    *horizon_core::sync::lock(&PRELOAD) = Preload::Used;
 }
 
 /// A server's world opens: the loot tables its first placed block or broken

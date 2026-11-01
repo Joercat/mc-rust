@@ -234,7 +234,7 @@ struct Mailbox {
 }
 impl Mailbox {
     fn send(&self, done: Done) {
-        self.done.lock().unwrap().push_back(done);
+        horizon_core::sync::lock(&self.done).push_back(done);
         self.arrived.notify_one();
     }
     fn try_lock(&self) -> Option<MutexGuard<'_, VecDeque<Done>>> {
@@ -272,7 +272,7 @@ impl Mailbox {
         }
         #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
         {
-            let done = self.done.lock().unwrap();
+            let done = horizon_core::sync::lock(&self.done);
             let (mut done, _) = self
                 .arrived
                 .wait_timeout_while(done, timeout, |done| done.is_empty())
@@ -577,7 +577,7 @@ impl Streaming {
                     Done::Lit(x, z, light_chunk(&borrow(&region), light, sky), seq)
                 }
                 Job::Mesh(x, sy, z, region, seq, settings) => {
-                    let context = shared.context.read().unwrap().clone();
+                    let context = horizon_core::sync::read(&shared.context).clone();
                     let visibility = match faces.take() {
                         Some((tables, visibility)) if Arc::ptr_eq(&tables, &context.tables) => {
                             visibility
@@ -2101,7 +2101,7 @@ impl Drop for Streaming {
         self.shared.stop.store(true, Ordering::Relaxed);
         self.shared.ready.notify_all();
         for t in self.threads.drain(..) {
-            let _ = t.join();
+            let _ = horizon_core::sync::join(t);
         }
     }
 }
@@ -2141,7 +2141,7 @@ mod tests {
         let lit = |seq| Done::Lit(0, 0, Vec::new(), seq);
         mailbox.send(lit(1));
         mailbox.send(lit(2));
-        let sending = mailbox.done.lock().unwrap();
+        let sending = horizon_core::sync::lock(&mailbox.done);
         assert!(mailbox.take().is_empty());
         assert!(mailbox.try_recv().is_none());
         drop(sending);

@@ -14,7 +14,7 @@ pub const MISMATCH: &str =
 /// Hash the network order and each state's name and properties, not its gameplay facts.
 pub fn identity(root: &Path) -> Result<[u8; 32], String> {
     static IDENTITIES: OnceLock<Mutex<HashMap<PathBuf, [u8; 32]>>> = OnceLock::new();
-    let mut identities = IDENTITIES.get_or_init(Default::default).lock().unwrap();
+    let mut identities = horizon_core::sync::lock(IDENTITIES.get_or_init(Default::default));
     if let Some(hash) = identities.get(root) {
         return Ok(*hash);
     }

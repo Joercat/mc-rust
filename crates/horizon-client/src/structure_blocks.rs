@@ -125,7 +125,7 @@ static LOOT: Mutex<Option<Option<Arc<LootData>>>> = Mutex::new(None);
 
 /// Loot data of the resource root, loaded once per process.
 pub fn loot_data(root: &Path) -> Option<Arc<LootData>> {
-    let mut loot = LOOT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut loot = horizon_core::sync::lock(&LOOT);
     loot.get_or_insert_with(|| match LootData::load(root) {
         Ok(data) => Some(Arc::new(data)),
         Err(e) => {
@@ -138,8 +138,7 @@ pub fn loot_data(root: &Path) -> Option<Arc<LootData>> {
 
 /// The loot data `loot_data` loaded, if it ran.
 pub fn loaded_loot_data() -> Option<Arc<LootData>> {
-    LOOT.lock()
-        .unwrap_or_else(|e| e.into_inner())
+    horizon_core::sync::lock(&LOOT)
         .clone()
         .flatten()
 }
@@ -147,7 +146,7 @@ pub fn loaded_loot_data() -> Option<Arc<LootData>> {
 /// Let go of the loot data: for a preload no world used
 /// (game/world_loading.rs). The next `loot_data` loads it again.
 pub fn forget_loot_data() {
-    *LOOT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *horizon_core::sync::lock(&LOOT) = None;
 }
 
 /// `RandomizableContainer.unpackLootTable` of a container at `pos`: `table`

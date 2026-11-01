@@ -157,7 +157,7 @@ impl Drop for Builder {
         self.shared.stop.store(true, Ordering::Relaxed);
         self.shared.wake.notify_one();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let _ = horizon_core::sync::join(thread);
         }
     }
 }

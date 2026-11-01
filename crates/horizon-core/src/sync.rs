@@ -90,3 +90,26 @@ pub fn write<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
         std::hint::spin_loop();
     }
 }
+
+/// Join `handle` without parking a thread that may not: a page's main thread
+/// spins until the thread has finished, by which point `join` returns at once.
+pub fn join<T>(handle: std::thread::JoinHandle<T>) -> std::thread::Result<T> {
+    if !may_block() {
+        while !handle.is_finished() {
+            std::hint::spin_loop();
+        }
+    }
+    handle.join()
+}
+
+/// Wait for `duration` without parking a thread that may not.
+pub fn sleep(duration: std::time::Duration) {
+    if may_block() {
+        std::thread::sleep(duration);
+        return;
+    }
+    let until = crate::time::Instant::now() + duration;
+    while crate::time::Instant::now() < until {
+        std::hint::spin_loop();
+    }
+}

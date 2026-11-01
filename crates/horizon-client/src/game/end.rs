@@ -173,10 +173,10 @@ impl EndFlash {
 }
 impl EndState {
     pub(super) fn locator(&self) -> Option<Arc<VanillaTerrain>> {
-        self.locator.lock().unwrap().clone()
+        horizon_core::sync::lock(&self.locator).clone()
     }
     pub(super) fn set_locator(&self, terrain: Option<Arc<VanillaTerrain>>) {
-        *self.locator.lock().unwrap() = terrain;
+        *horizon_core::sync::lock(&self.locator) = terrain;
     }
 }
 
@@ -1261,11 +1261,7 @@ impl Game<'_> {
     /// then an EyeOfEnder signalled towards it. Without a stronghold (other
     /// dimensions) nothing is thrown.
     fn throw_ender_eye(&mut self) {
-        let rings = self
-            .end
-            .locator
-            .lock()
-            .unwrap()
+        let rings = horizon_core::sync::lock(&self.end.locator)
             .as_ref()
             .and_then(|t| t.ring_positions("minecraft:strongholds"));
         let (Some(rings), Some(p)) = (rings, self.player.as_ref()) else {

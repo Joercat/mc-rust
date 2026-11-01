@@ -621,7 +621,7 @@ impl Occlusion {
         if self.running.is_none() {
             return;
         }
-        let result = if wait {
+        let result = if wait && horizon_core::sync::may_block() {
             worker.done.recv().map_err(|_| TryRecvError::Disconnected)
         } else {
             worker.done.try_recv()

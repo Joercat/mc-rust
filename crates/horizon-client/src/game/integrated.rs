@@ -101,6 +101,22 @@ impl Integrated {
                 let _ = tx.send(f(g));
             }))
             .ok()?;
+        if !horizon_core::sync::may_block() {
+            // A page's main thread cannot park: poll while the server thread runs.
+            let deadline = horizon_core::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match rx.try_recv() {
+                    Ok(value) => return Some(value),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        if horizon_core::time::Instant::now() > deadline {
+                            return None;
+                        }
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+        }
         rx.recv_timeout(Duration::from_secs(10)).ok()
     }
     /// `IntegratedServer.halt(true)`: returns once the world is saved and let go.
@@ -119,17 +135,10 @@ impl Integrated {
     fn halt(&mut self) -> Result<()> {
         self.request_stop();
         if let Some(thread) = self.thread.take() {
-            thread
-                .join()
+            horizon_core::sync::join(thread)
                 .map_err(|_| "the integrated server panicked")?;
         }
-        match self
-            .flags
-            .failure
-            .lock()
-            .map_err(|_| "server status poisoned")?
-            .as_ref()
-        {
+        match horizon_core::sync::lock(&self.flags.failure).as_ref() {
             Some(error) => Err(error.clone().into()),
             None => Ok(()),
         }
@@ -277,7 +286,7 @@ impl Game<'_> {
                 );
                 if let Err(e) = result {
                     log::error!("Horizon: integrated server: {e}");
-                    *server_flags.failure.lock().unwrap() = Some(e.to_string());
+                    *horizon_core::sync::lock(&server_flags.failure) = Some(e.to_string());
                     let _ = ready_tx.send(Err(e.to_string()));
                 }
             })?;
@@ -885,7 +894,7 @@ mod tests {
         let server = Integrated {
             flags,
             thread: Some(std::thread::spawn(move || {
-                *saving.failure.lock().unwrap() = Some("disk write failed".into());
+                *horizon_core::sync::lock(&saving.failure) = Some("disk write failed".into());
             })),
             tasks,
             world_name: String::new(),

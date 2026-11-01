@@ -710,7 +710,7 @@ impl Loading {
         self.loaded = None;
         self.delivered = false;
         if let Some(handle) = self.handle.take() {
-            handle.join().map_err(|payload| {
+            horizon_core::sync::join(handle).map_err(|payload| {
                 format!("resource loader panicked: {}", panic_text(payload.as_ref()))
             })?;
         }

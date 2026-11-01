@@ -444,7 +444,7 @@ impl Creative {
             ""
         };
         let language = names.display_get("itemGroup.search").unwrap_or_default();
-        let mut shown = self.shown.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shown = horizon_core::sync::lock(&self.shown);
         if let Some(s) = shown.as_ref()
             && s.tab == tab
             && s.search == search
@@ -488,7 +488,7 @@ impl Creative {
     /// Drop the shown items, so the next `items` works them out again: a
     /// reload can rename items without changing the Search label.
     pub fn forget_items(&self) {
-        *self.shown.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *horizon_core::sync::lock(&self.shown) = None;
     }
     pub fn rows(&self, names: &Names) -> usize {
         self.items(names).len().div_ceil(9)

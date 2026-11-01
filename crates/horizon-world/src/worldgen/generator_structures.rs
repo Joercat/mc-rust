@@ -94,7 +94,14 @@ impl RingWork {
         }
         let mut left = self.left.lock().unwrap();
         while *left > 0 {
-            left = self.finished.wait(left).unwrap();
+            if horizon_core::sync::may_block() {
+                left = self.finished.wait(left).unwrap();
+            } else {
+                // A page's main thread cannot park: poll the counter instead.
+                drop(left);
+                std::hint::spin_loop();
+                left = self.left.lock().unwrap();
+            }
         }
     }
     /// The positions by set name, once every search is done.

@@ -281,6 +281,14 @@ page's main thread and parks only on workers; `horizon_threads` re-exports
 them. The mailbox polls (`try_recv`) rather than waits. Workers may block
 freely.
 
+Waiting on a thread is the same hazard: `JoinHandle::join`, `thread::sleep`
+and `Condvar::wait` all end in `memory.atomic.wait32`. The frame joins through
+`horizon_core::sync::join` (spin until `is_finished`, then collect) and waits
+through `sync::sleep`; a `Condvar` wait is taken only when `may_block()` is
+true, and where a worker's answer is needed on the frame (`Integrated::call`,
+the occlusion worker) the frame polls a channel with a deadline instead. The
+per-site list is [the main-thread audit](main-thread-audit.md).
+
 Nothing on the frame's path waits on a lock a worker can hold. The log's
 recent-line buffer (`horizon-client-render/src/logging.rs`), the region writer's
 pending and outstanding bookkeeping with its `flush` (`save.rs`), the region
@@ -305,5 +313,6 @@ instead of covering the page with the crash message.
 
 Still on the frame in the web build: resource loading (`par::par_map` maps
 serially, so the first load is still one thread), `WorldLoader`'s prepare step,
-far terrain (`lod.rs`) and the occlusion search. They are the next candidates;
-the streamer is where walking into unloaded chunks spent the frame.
+far terrain (`lod.rs`) and the occlusion search. They no longer park the frame,
+but they still spend its time; the streamer is where walking into unloaded
+chunks used to.

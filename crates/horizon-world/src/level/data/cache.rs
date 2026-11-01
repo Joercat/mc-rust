@@ -206,7 +206,7 @@ fn sources_digest(root: &Path) -> io::Result<[u8; 32]> {
             Ok((path.clone(), meta.len(), meta.modified().ok()))
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let known = SOURCES.lock().unwrap_or_else(|e| e.into_inner());
+    let known = horizon_core::sync::lock(&SOURCES);
     if let Some((_, digest)) = known.iter().find(|(s, _)| *s == stamps) {
         return Ok(*digest);
     }
@@ -229,9 +229,7 @@ fn sources_digest(root: &Path) -> io::Result<[u8; 32]> {
         }
     }
     let digest: [u8; 32] = hasher.finalize().into();
-    SOURCES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    horizon_core::sync::lock(&SOURCES)
         .push((stamps, digest));
     Ok(digest)
 }
@@ -860,9 +858,7 @@ mod tests {
             return;
         };
         let entries = || {
-            SOURCES
-                .lock()
-                .unwrap()
+            horizon_core::sync::lock(&SOURCES)
                 .iter()
                 .filter(|(stamps, _)| stamps[0].0.starts_with(&root.0))
                 .count()

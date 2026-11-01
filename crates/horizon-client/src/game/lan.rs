@@ -33,7 +33,7 @@ static SYNC: Mutex<Option<std::result::Result<Arc<SyncData>, String>>> = Mutex::
 
 /// The registries and tags a server sends, loaded from `root` the first time.
 pub(super) fn sync_data(root: &std::path::Path) -> std::result::Result<Arc<SyncData>, String> {
-    let mut sync = SYNC.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sync = horizon_core::sync::lock(&SYNC);
     sync.get_or_insert_with(|| SyncData::load(root).map(Arc::new))
         .clone()
 }
@@ -41,7 +41,7 @@ pub(super) fn sync_data(root: &std::path::Path) -> std::result::Result<Arc<SyncD
 /// Let go of what `sync_data` loaded: for a preload no world used
 /// (game/world_loading.rs).
 pub(super) fn forget_sync_data() {
-    *SYNC.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *horizon_core::sync::lock(&SYNC) = None;
 }
 
 /// The settings of the open world (WorldOptionsScreen's multiplayer section).

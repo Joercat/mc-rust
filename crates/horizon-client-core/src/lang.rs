@@ -225,10 +225,10 @@ pub fn available(sources: &[&dyn ResourceSource]) -> Vec<LanguageInfo> {
 
 pub fn set(language: Language) {
     BIDIRECTIONAL.store(language.bidirectional, Ordering::Relaxed);
-    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(language));
+    *horizon_core::sync::write(&CURRENT) = Some(Arc::new(language));
 }
 pub fn current() -> Option<Arc<Language>> {
-    CURRENT.read().unwrap_or_else(|e| e.into_inner()).clone()
+    horizon_core::sync::read(&CURRENT).clone()
 }
 /// `ClientLanguage.defaultRightToLeft` of the current language.
 pub fn bidirectional() -> bool {
