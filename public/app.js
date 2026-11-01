@@ -39,6 +39,15 @@ function fail(err) {
 // can run. The threaded one needs cross-origin isolation for shared memory.
 let wasm = null;
 let init = null;
+// Stamped into every engine URL: the modules are tens of megabytes and a host
+// or browser will happily keep one from an older build under the same path.
+// Bump this whenever `scripts/build_web.sh` publishes new engines.
+const BUILD = "3fb057d";
+const withBuild = (path) => {
+  const url = new URL(path, import.meta.url);
+  url.searchParams.set("v", BUILD);
+  return url;
+};
 const ENGINES = {
   threaded: {
     glue: "./horizon-client-threaded.js",
@@ -64,7 +73,7 @@ async function present(url) {
 async function chooseEngine() {
   const isolated =
     globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
-  if (isolated && (await present(new URL(ENGINES.threaded.glue, import.meta.url)))) {
+  if (isolated && (await present(withBuild(ENGINES.threaded.glue)))) {
     return { ...ENGINES.threaded, threaded: true };
   }
   if (isolated) say("threaded engine not built: using the single-threaded one");
@@ -105,7 +114,7 @@ async function loadEngine() {
     ["./horizon-vfs.bin", "the resource pack"],
   ]) {
     try {
-      const response = await fetch(new URL(path, import.meta.url), { method: "HEAD" });
+      const response = await fetch(withBuild(path), { method: "HEAD" });
       if (response.status === 404 || response.status === 410) {
         missing.push(`  ${path.slice(2)} — ${what} (HTTP ${response.status})`);
       }
@@ -122,7 +131,7 @@ async function loadEngine() {
         "(needs the wasm32 Rust toolchain; see docs/WEB.md for the prerequisites)",
     );
   }
-  const module = await import(engine.glue);
+  const module = await import(withBuild(engine.glue).href);
   wasm = module;
   init = module.default;
   return engine;
@@ -228,7 +237,7 @@ async function startEngineThreads(engine) {
     const workers = await startThreadPool({
       module: handles[0],
       memory: handles[1],
-      glueUrl: new URL(engine.glue, import.meta.url).href,
+      glueUrl: withBuild(engine.glue).href,
       count,
     });
     say(`worker threads: ${workers.length}`);
@@ -242,8 +251,8 @@ async function boot() {
   phase("looking for the engine…", 0.01);
   const engine = await loadEngine();
   phase("loading engine…", 0.03);
-  await init({ module_or_path: new URL(engine.wasm, import.meta.url) });
-  say(engine.threaded ? "wasm engine ready (threaded)" : "wasm engine ready");
+  await init({ module_or_path: withBuild(engine.wasm) });
+  say(engine.threaded ? `wasm engine ready (threaded, build ${BUILD})` : `wasm engine ready (build ${BUILD})`);
 
   phase("starting worker threads…", 0.04);
   await startEngineThreads(engine);
