@@ -204,7 +204,14 @@ def main():
     args = parser.parse_args()
 
     handler = functools.partial(Handler, directory=ROOT)
-    with Server((args.bind, args.port), handler) as httpd:
+    try:
+        httpd = Server((args.bind, args.port), handler)
+    except OSError as error:
+        sys.exit(
+            f"cannot listen on {args.bind}:{args.port}: {error}\n"
+            "Another server is probably still running there: stop it (Ctrl+C) and retry."
+        )
+    with httpd:
         scheme = "http"
         if args.tls or (args.cert and args.key):
             cert, key = (args.cert, args.key) if args.cert and args.key else certificate()
@@ -217,10 +224,11 @@ def main():
         for url in urls(scheme, port):
             print(f"  {url}", flush=True)
         if scheme == "https":
-            print("The certificate is self-signed: accept the warning in the browser once.", flush=True)
+            print("Open the https:// URL above; accept the certificate warning once.", flush=True)
+            print("(http:// on this port gets no answer: it is a TLS listener.)", flush=True)
         elif len(urls(scheme, port)) > 1:
-            print("Only http://localhost is a secure context: other addresses lose threads.", flush=True)
-            print("Use --tls (and accept the certificate warning) to keep them.", flush=True)
+            print("Plain HTTP outside localhost is not a secure context: the page runs", flush=True)
+            print("the single-threaded engine. Restart with --tls to serve HTTPS.", flush=True)
         httpd.serve_forever()
 
 

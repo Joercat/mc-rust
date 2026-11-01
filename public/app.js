@@ -70,6 +70,35 @@ async function present(url) {
   }
 }
 
+// Why the page cannot be cross-origin isolated, in the words that name the
+// thing to fix: the threaded engine's shared memory needs all of it.
+async function isolationProblem() {
+  if (globalThis.isSecureContext !== true) {
+    return `${location.origin} is not a secure context: open it over HTTPS, or on localhost`;
+  }
+  if (typeof SharedArrayBuffer === "undefined") {
+    return "this browser has no SharedArrayBuffer";
+  }
+  // Same origin, so the response's headers are readable: neither isolation
+  // header is a forbidden response header name.
+  let coop = null;
+  let coep = null;
+  try {
+    const response = await fetch(location.href, { method: "HEAD", cache: "no-store" });
+    coop = response.headers.get("cross-origin-opener-policy");
+    coep = response.headers.get("cross-origin-embedder-policy");
+  } catch {
+    // A host that refuses HEAD keeps the generic wording below.
+  }
+  if (!coop || !coep) {
+    return "the server sends no COOP/COEP headers (scripts/serve_web.py does)";
+  }
+  if (coop !== "same-origin" || (coep !== "require-corp" && coep !== "credentialless")) {
+    return `the server's COOP/COEP headers (${coop}, ${coep}) do not isolate this page`;
+  }
+  return "this page is embedded by one that is not isolated";
+}
+
 async function chooseEngine() {
   const isolated =
     globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
@@ -77,15 +106,7 @@ async function chooseEngine() {
     return { ...ENGINES.threaded, threaded: true };
   }
   if (isolated) say("threaded engine not built: using the single-threaded one");
-  else if (
-    location.protocol === "http:" &&
-    !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)
-  ) {
-    // Isolation also needs a secure context, and a plain-HTTP LAN address is
-    // not one however good the headers are: only localhost or HTTPS gets it.
-    say("threads need HTTPS or localhost: single-threaded engine");
-  } else say("page is not cross-origin isolated: single-threaded engine");
-  console.warn("[horizon] cross-origin isolated:", isolated, location.origin);
+  else say(`single-threaded engine: ${await isolationProblem()}`);
   return { ...ENGINES.single, threaded: false };
 }
 
