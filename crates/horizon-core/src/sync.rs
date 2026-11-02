@@ -32,7 +32,22 @@ mod imp {
     }
 }
 
-#[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+mod imp {
+    /// The single-threaded page build has no threads at all: no worker exists
+    /// that could release a parked thread, and std's no-threads condvar does
+    /// not wait — it panics with "condvar wait not supported". Nothing in this
+    /// build may park, so every wait takes the polling path the threaded build
+    /// uses on the page's main thread.
+    pub fn may_block() -> bool {
+        false
+    }
+
+    /// There is nothing to park on, so a caller that asks to is ignored.
+    pub fn set_may_block(_may: bool) {}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::cell::Cell;
 

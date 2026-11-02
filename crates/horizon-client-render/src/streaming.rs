@@ -254,11 +254,13 @@ impl Mailbox {
         self.try_lock()?.pop_front()
     }
     fn recv_timeout(&self, timeout: std::time::Duration) -> Option<Done> {
-        // The page's main thread may not park (`Atomic.wait` traps there): it
-        // looks at the mailbox until the deadline instead, while the workers
-        // make progress on their own threads.
-        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-        {
+        // A thread that may not park looks at the mailbox until the deadline
+        // instead, while the workers make progress on their own threads. That
+        // is the page's main thread in the threaded build (`Atomic.wait` traps
+        // there) and every thread of the single-threaded build, where std's
+        // condvar does not wait at all: it panics with "condvar wait not
+        // supported", which used to kill a page that is not isolated.
+        if !horizon_core::sync::may_block() {
             let deadline = horizon_core::time::Instant::now() + timeout;
             loop {
                 if let Some(done) = self.try_recv() {
@@ -270,15 +272,12 @@ impl Mailbox {
                 std::hint::spin_loop();
             }
         }
-        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-        {
-            let done = horizon_core::sync::lock(&self.done);
-            let (mut done, _) = self
-                .arrived
-                .wait_timeout_while(done, timeout, |done| done.is_empty())
-                .unwrap();
-            done.pop_front()
-        }
+        let done = horizon_core::sync::lock(&self.done);
+        let (mut done, _) = self
+            .arrived
+            .wait_timeout_while(done, timeout, |done| done.is_empty())
+            .unwrap();
+        done.pop_front()
     }
 }
 pub struct Streaming {
