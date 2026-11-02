@@ -44,6 +44,10 @@ enum Stage {
 // is indivisible; check the time budget after each snapshot, not each batch.
 const SNAPSHOTS_PER_FRAME: usize = 16;
 const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
+/// One frame's slice of the writer's queue: the snapshot stages are a couple of
+/// milliseconds, but writing a save's files is the long pole, and at 2 ms a
+/// frame a single-threaded save took sixteen seconds to land.
+const WRITE_BUDGET: Duration = Duration::from_millis(6);
 
 /// `save_game_metadata` in steps, one per frame (see `save_metadata_step`).
 const METADATA_STEPS: u8 = 13;
@@ -232,7 +236,12 @@ impl Game<'_> {
                     };
                 }
                 AutosaveStage::Writes => {
-                    finished = self.save.write_some(SNAPSHOT_BUDGET)?;
+                    let started = Instant::now();
+                    finished = self.save.write_some(WRITE_BUDGET)?;
+                    let ms = started.elapsed().as_secs_f32() * 1000.0;
+                    if ms > 50.0 {
+                        log::info!("Horizon: save write took {ms:.0} ms");
+                    }
                 }
             }
             Ok(())

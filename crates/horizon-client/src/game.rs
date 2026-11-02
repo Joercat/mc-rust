@@ -5397,7 +5397,11 @@ impl Game<'_> {
         self.poll_autosave()?;
         // Unloaded chunks and a paused save queue writes too: the frame moves a
         // millisecond of them so the queue cannot grow into a stall.
-        let _ = self.save.write_some(Duration::from_millis(1));
+        let drain = Instant::now();
+        let _ = self.save.write_some(WRITE_DRAIN);
+        if drain.elapsed() > Duration::from_millis(50) {
+            log::info!("Horizon: save drain took {:?}", drain.elapsed());
+        }
         if running {
             self.advance_clock();
         }
@@ -13284,6 +13288,7 @@ impl ApplicationHandler for Game<'_> {
             return;
         }
         follow_keymap(&mut event);
+        let _event_timer = WebEventTimer::new(&event);
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
@@ -14174,12 +14179,31 @@ impl ApplicationHandler for Game<'_> {
                             );
                             self.frame_stats.record_cpu(ms(cpu));
                             let render = r.last_encode;
-                            self.frame_stats.record_phases([
+                            let phases = [
                                 ms(updated - now),
                                 ms(ticked - updated),
                                 ms(ticked.elapsed().saturating_sub(r.last_wait + render)),
                                 ms(render),
-                            ]);
+                            ];
+                            self.frame_stats.record_phases(phases);
+                            // What a freeze is made of: the world update, the
+                            // ticks, the wait for the GPU and the render. The
+                            // whole-frame timer alone never said which.
+                            if phases.iter().fold(0.0_f32, |a, b| a.max(*b)) > 50.0 {
+                                let screen = match self.screen {
+                                    Screen::Playing => "playing",
+                                    Screen::Inventory => "container",
+                                    Screen::Creative => "creative",
+                                    _ => "menu",
+                                };
+                                log::info!(
+                                    "Horizon: frame update {:.0} ms, tick {:.0} ms, gpu wait {:.0} ms, render {:.0} ms (screen {screen}, container {}, autosave {}, chunks {})",
+                                    phases[0], phases[1], phases[2], phases[3],
+                                    self.container.is_some(),
+                                    self.pending_autosave.is_some(),
+                                    self.world.chunks.len(),
+                                );
+                            }
                         }
                         self.frame_stats.record_gpu(&r.gpu_times);
                         r.gpu_times.clear();
@@ -17020,5 +17044,49 @@ fn web_quality_cap(search: &str) -> Option<i32> {
         "balanced" => Some(12),
         "high" => Some(horizon_client::options_file::MAX_RENDER_DISTANCE),
         _ => None,
+    }
+}
+
+/// The save writer's budget for one frame's drain: enough that a save of a few
+/// hundred region files finishes in seconds, small enough that no frame pays a
+/// visible price for it.
+const WRITE_DRAIN: Duration = Duration::from_millis(4);
+
+/// Times one window event and reports it when it costs more than a frame. A
+/// click that opens a chest is handled in the event, so a render-only timer
+/// never saw it.
+struct WebEventTimer {
+    name: &'static str,
+    started: Instant,
+}
+impl WebEventTimer {
+    fn new(event: &winit::event::WindowEvent) -> Self {
+        Self {
+            name: window_event_name(event),
+            started: Instant::now(),
+        }
+    }
+}
+impl Drop for WebEventTimer {
+    fn drop(&mut self) {
+        if self.name.is_empty() {
+            return;
+        }
+        let ms = self.started.elapsed().as_secs_f32() * 1000.0;
+        if ms > 50.0 {
+            log::info!("Horizon: {} handler took {ms:.0} ms", self.name);
+        }
+    }
+}
+/// The events worth timing; cursor motion and redraws are the frame's own.
+fn window_event_name(event: &winit::event::WindowEvent) -> &'static str {
+    use winit::event::WindowEvent as E;
+    match event {
+        E::MouseInput { .. } => "mouse input",
+        E::KeyboardInput { .. } => "keyboard input",
+        E::MouseWheel { .. } => "mouse wheel",
+        E::Resized(_) => "resize",
+        E::Focused(_) => "focus",
+        _ => "",
     }
 }

@@ -236,12 +236,15 @@ async function useOnce(page, label) {
   });
   const t0 = Date.now();
   await page.mouse.click(box.x, box.y, { button: "right" });
+  const clickMs = Date.now() - t0;
   for (let i = 0; i < 300; i += 1) {
     const state = await status(page);
     if (state && state.state === "menu" && state.pause === false) {
       const ms = Date.now() - t0;
-      console.log(`  [${label}] container screen after ${ms} ms (probe cadence 50 ms)`);
-      return { opened: true, ms };
+      console.log(
+        `  [${label}] container screen after ${ms} ms (click dispatch ${clickMs} ms, probe cadence 50 ms)`,
+      );
+      return { opened: true, ms, clickMs };
     }
     await new Promise((r) => setTimeout(r, 10));
   }
@@ -287,7 +290,9 @@ async function openPage(context, url, label) {
     // error: the timing lines are the point of running the page for real.
     if (
       message.type() === "error" ||
-      /Atomics\.wait|\[horizon\].*(took|container opened|mirror slice)/.test(line)
+      /Atomics\.wait|(container opened|frame update|handler took|save step|autosave step|save write|save drain|mirror slice|took [0-9])/.test(
+        line,
+      )
     ) {
       console.log(`  [${label}] ${line}`);
     }
