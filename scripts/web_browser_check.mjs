@@ -376,6 +376,31 @@ const browser = await chromium.launch({
   args: HEADLESS_FLAGS,
 });
 
+/// Run across chunk borders holding the keys a player holds: the path that
+/// generates, meshes and uploads chunks under the player's feet.
+async function runForward(page, label) {
+  const before = await status(page);
+  const from = await page.evaluate(() => performance.now());
+  await page.keyboard.down("Shift");
+  await page.keyboard.down("w");
+  let after = before;
+  const started = Date.now();
+  while (Date.now() - started < 24_000) {
+    await new Promise((r) => setTimeout(r, 2000));
+    after = await status(page);
+  }
+  await page.keyboard.up("w");
+  await page.keyboard.up("Shift");
+  const to = await page.evaluate(() => performance.now());
+  const task = await worstTask(page, from, to);
+  const generated = (after.generated_chunks || 0) - (before.generated_chunks || 0);
+  console.log(
+    `  [${label}] run: ${generated} chunk(s) generated, ${before.chunks} -> ${after.chunks} resident, ` +
+      `worst main-thread task ${task.ms} ms`,
+  );
+  return { ms: Math.round(to - from), task: task.ms, generated, chunks: after.chunks };
+}
+
 /// One full session. `stripIsolation` removes COOP/COEP from the document
 /// response, which is exactly what makes a browser not isolate the page — the
 /// situation a player is in when the threaded engine's wait throws.
@@ -450,6 +475,7 @@ async function runSession({ label, stripIsolation, reload }) {
     await waitState(page, "playing", 3000);
   }
 
+  const travel = await runForward(page, label);
   console.log(`  [${label}] running for autosaves…`);
   const beforeAutosave = await savedFiles(page);
   await new Promise((r) => setTimeout(r, 70_000));
@@ -486,6 +512,7 @@ async function runSession({ label, stripIsolation, reload }) {
   if (again.opened && again.ms > 1000) fail(`${label}: the second container open took ${again.ms} ms`);
   if (!worldState || worldState.state !== "playing") fail(`${label}: the page never reached the game's playing state`);
   if (!(autosaved.count > beforeAutosave.count)) fail(`${label}: the engine's autosave wrote nothing`);
+  if (travel.generated === 0) fail(`${label}: holding W generated no chunk, so nothing was measured`);
 
   let reloadResult = null;
   if (reload) {
@@ -519,6 +546,7 @@ async function runSession({ label, stripIsolation, reload }) {
     worldState,
     saves,
     autosaved,
+    travel,
     chest,
     again,
     moves,
@@ -555,6 +583,7 @@ const summary = (session) =>
     `chest=${session.chest.opened ? `${session.chest.ms}ms(tasks ${session.chest.task}ms)` : "failed"}`,
     `chest again=${session.again.opened ? `${session.again.ms}ms(tasks ${session.again.task}ms)` : "failed"}`,
     `chest pick=${session.moves.length > 0 ? `${session.moves.map((m) => m.task).join("/")}ms` : "failed"}`,
+    `run: ${session.travel.generated} chunk(s), worst ${session.travel.task}ms`,
     `Atomics.wait=${session.atomics}`,
     `worst in play=${session.worstInPlay}ms`,
     `worst loading=${session.worstLoading}ms`,

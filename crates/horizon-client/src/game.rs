@@ -13146,7 +13146,13 @@ impl Game<'_> {
         let (far_distance, far_reduced) = self.far_terrain_choice();
         if let Some(renderer) = self.renderer.as_mut() {
             let g = &self.settings.horizon;
-            let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
+            // A page cannot afford the frame a burst of freshly meshed
+            // sections lands in: the budget path below is the only one that
+            // lets a frame end early, so on the web it is always taken, even
+            // with the settings' budgets at 0 (where every graphics preset
+            // leaves them).
+            let budgeted =
+                g.chunk_updates > 0 || g.upload_budget_kib > 0 || cfg!(target_arch = "wasm32");
             // The meshes, once copied, are freed by a worker (`Streaming::free`).
             if !budgeted && self.pending_uploads.is_empty() {
                 horizon_client::spans::time("upload", || {
@@ -13187,12 +13193,18 @@ impl Game<'_> {
                     (0, 0)
                 };
                 let (mut count, mut bytes) = (0, 0u64);
+                // The first section always goes (the clock never decides for
+                // it), and the frame stops at the deadline with the rest
+                // queued nearest-first for the frames after.
+                let deadline = cfg!(target_arch = "wasm32")
+                    .then(|| Instant::now() + std::time::Duration::from_millis(3));
                 while let Some((_, mesh)) = pending.last() {
                     let size = ((mesh.solid.len() + mesh.translucent.len())
                         * std::mem::size_of::<horizon_client::mesher::TerrainVertex>())
                         as u64;
                     if (limit > 0 && count >= limit)
                         || (budget > 0 && bytes > 0 && bytes + size > budget)
+                        || (count > 0 && deadline.is_some_and(|d| Instant::now() >= d))
                     {
                         break;
                     }
