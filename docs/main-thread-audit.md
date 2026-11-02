@@ -100,6 +100,36 @@ That is the deferral, not the game: it proves the frame never waits longer than
 a few microseconds for a 150 ms round trip, and that a request whose budget ran
 out is still answered. It does not measure opening a chest in a browser.
 
+## The page's own rules, measured
+
+`scripts/no_park_main_thread.sh` puts a host thread into exactly the page's
+configuration (`horizon_core::sync::set_may_block(false)`, which the wasm build
+sets for its main thread) and drives the shipped modules, not copies of them:
+`crates/horizon-core/src/sync.rs` and `game/frame_call.rs` are included from
+their real files. A save round is `write_region_records`' shape — chunk records
+written under `sync::lock`, an index taken through `sync::write`, a finished
+worker joined through `sync::join` — with a worker holding the region lock for
+300 µs so the frame has to spin through real contention. `compress_records`
+spawns no helper at all when the caller may not park, so the page's save is
+inline compression plus those short locks.
+
+```
+save 0: region 207.8µs, index 1.603µs, join 94.988µs
+save 1: region 237.465µs, index 570ns, join 22.893µs
+save 2: region 138.571µs, index 5.41µs, join 25.959µs
+
+three autosaves: 2.12157ms total, worst main-thread block 237.465µs (region lock)
+chest opens: 20 over 3.010702609s, worst frame block 5.21µs
+configuration: may_block=false (page), server latency 150ms
+```
+
+Zero traps is structural here rather than observed: with `may_block()` false
+every wait takes the spin path (`try_lock`/`try_read`/`try_write`,
+`is_finished`), so no `memory.atomic.wait32` is reachable from these paths at
+all, and the same code compiled for wasm has no other branch on that thread. The
+worst block is now a lock held by a worker, bounded by how long a holder keeps
+it, and the action's 150 ms round trip costs the frame 5 µs.
+
 ## What the labels rest on
 
 `frame-nonparking` sites are checked by the script for the shim, a

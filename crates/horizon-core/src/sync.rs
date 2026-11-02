@@ -34,11 +34,23 @@ mod imp {
 
 #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
 mod imp {
-    pub fn may_block() -> bool {
-        true
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The desktop and a page worker may park, which is the default. A
+        /// harness can put a thread into the page's configuration with
+        /// `set_may_block(false)`, and then exercises the same spin paths the
+        /// browser's main thread runs (`scripts/no_park_main_thread.sh`).
+        static MAY_BLOCK: Cell<bool> = const { Cell::new(true) };
     }
 
-    pub fn set_may_block(_: bool) {}
+    pub fn may_block() -> bool {
+        MAY_BLOCK.with(Cell::get)
+    }
+
+    pub fn set_may_block(may: bool) {
+        MAY_BLOCK.with(|w| w.set(may));
+    }
 }
 
 /// Whether the calling thread may park in a lock (always, except on the

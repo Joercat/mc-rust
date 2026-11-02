@@ -29,6 +29,9 @@ services:
       # engines' `?v=` stamp lives in `app.js`. A cached copy of these keeps a
       # player on an older engine after a deploy — including one whose bug is
       # fixed — so they are revalidated every load.
+      - path: /
+        name: Cache-Control
+        value: no-cache
       - path: /index.html
         name: Cache-Control
         value: no-cache
