@@ -66,7 +66,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.19";
+const BUILD = "2026-11-01.20";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -275,10 +275,15 @@ function deleteFiles(db, paths) {
 // one call, and a second drain started behind a slow IndexedDB write would only
 // copy the same bytes later. One batch at a time — but a drain asked for while
 // one runs (the page being hidden, say) is not dropped: the loop takes it next.
-// Bytes copied out of the engine per call. One autosave dirties hundreds of
-// region files at once; the engine slices them, so the copy is spread over
-// several turns of the event loop instead of stalling one frame for seconds.
-const PERSIST_SLICE = 4 << 20;
+// Bytes copied out of the engine per call. This copy is the part of the mirror
+// that runs on the page's main thread, and one autosave dirties hundreds of
+// region files at once. At 4 MiB a single slice was a multi-hundred-millisecond
+// task on a slow device, which the player feels as the game freezing while it
+// saves; a quarter of a megabyte is a task of a couple of milliseconds, and the
+// loop simply takes more turns of the event loop to finish. A slice that still
+// takes longer than 20 ms says so in the console, so the next report of a
+// hitch has a number.
+const PERSIST_SLICE = 256 << 10;
 let persisting = false;
 let persistQueued = false;
 async function persist(db) {
@@ -288,9 +293,18 @@ async function persist(db) {
   }
   persisting = true;
   try {
-    for (let batch = 0; batch < 64; batch += 1) {
+    let files = 0;
+    let removed = 0;
+    let more = true;
+    for (let batch = 0; batch < 256; batch += 1) {
       persistQueued = false;
-      const [written, deleted, more] = wasm.horizon_web_drain_changes(PERSIST_SLICE);
+      const started = performance.now();
+      const [written, deleted, next] = wasm.horizon_web_drain_changes(PERSIST_SLICE);
+      const copied = performance.now() - started;
+      if (copied > 20) {
+        console.log(`[horizon] mirror slice copied in ${copied.toFixed(0)} ms`);
+      }
+      more = next;
       if (written.length > 0 || deleted.length > 0) {
         const records = [];
         for (const [path, bytes, mtime] of written) {
@@ -300,13 +314,17 @@ async function persist(db) {
         }
         await writeFiles(db, records);
         await deleteFiles(db, deleted);
-        say(`saved ${records.length} file(s), removed ${deleted.length}`);
+        files += records.length;
+        removed += deleted.length;
       }
       // More to mirror, or a drain asked for while this one ran (the page
       // being hidden asks for one): either way another slice is due.
       if (!more && !persistQueued) break;
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
+    // The readout says what the whole drain did, not what each slice did: one
+    // DOM write per drain instead of one per quarter megabyte.
+    if (files > 0 || removed > 0) say(`saved ${files} file(s), removed ${removed}`);
   } finally {
     persisting = false;
   }

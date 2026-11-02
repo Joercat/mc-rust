@@ -287,7 +287,7 @@ async function openPage(context, url, label) {
     // error: the timing lines are the point of running the page for real.
     if (
       message.type() === "error" ||
-      /Atomics\.wait|\[horizon\].*took/.test(line)
+      /Atomics\.wait|\[horizon\].*(took|container opened|mirror slice)/.test(line)
     ) {
       console.log(`  [${label}] ${line}`);
     }
