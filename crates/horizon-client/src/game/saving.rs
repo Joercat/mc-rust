@@ -16,7 +16,10 @@ pub(super) struct Autosave {
 enum AutosaveStage {
     Chunks,
     Entities,
-    Metadata,
+    /// One metadata step per frame: `save_game_metadata` is a dozen
+    /// independent file writes, and writing them in the one frame the old
+    /// stage ran in was the hitch a player saw as "Saving world".
+    Metadata(u8),
     Writes,
 }
 
@@ -31,6 +34,7 @@ enum Stage {
     Generation,
     Chunks(VecDeque<(i32, i32)>),
     Entities(VecDeque<(i32, i32)>),
+    Metadata(u8),
     Writes,
     Server,
     Quit,
@@ -40,6 +44,27 @@ enum Stage {
 // is indivisible; check the time budget after each snapshot, not each batch.
 const SNAPSHOTS_PER_FRAME: usize = 16;
 const SNAPSHOT_BUDGET: Duration = Duration::from_millis(2);
+
+/// `save_game_metadata` in steps, one per frame (see `save_metadata_step`).
+const METADATA_STEPS: u8 = 13;
+/// The steps' names, for the log line a slow step writes.
+const METADATA_NAMES: [&str; METADATA_STEPS as usize] = [
+    "prune",
+    "maps",
+    "random_sequences",
+    "fight",
+    "wandering_trader",
+    "portal_arrivals",
+    "stats",
+    "advancements",
+    "scoreboard",
+    "bossbars",
+    "schedule",
+    "warden_tracker",
+    "level",
+];
+/// A step slower than this is one a player can feel.
+const SLOW_STEP: Duration = Duration::from_millis(20);
 
 impl Game<'_> {
     pub(super) fn begin_closing_save(&mut self, quit: bool) -> Result<()> {
@@ -156,6 +181,15 @@ impl Game<'_> {
             return Ok(());
         };
         let started = Instant::now();
+        let step = match save.stage {
+            AutosaveStage::Chunks => "chunks",
+            AutosaveStage::Entities => "entities",
+            AutosaveStage::Metadata(step) => METADATA_NAMES
+                .get(usize::from(step))
+                .copied()
+                .unwrap_or("level"),
+            AutosaveStage::Writes => "writes",
+        };
         let mut finished = false;
         let result = (|| -> Result<()> {
             match save.stage {
@@ -187,14 +221,15 @@ impl Game<'_> {
                             return Ok(());
                         }
                     }
-                    save.stage = AutosaveStage::Metadata;
+                    save.stage = AutosaveStage::Metadata(0);
                 }
-                AutosaveStage::Metadata => {
-                    self.prune_entity_memory();
-                    self.save_raids();
-                    self.save.save_forced_chunks(&self.streaming.forced)?;
-                    self.save_game_metadata()?;
-                    save.stage = AutosaveStage::Writes;
+                AutosaveStage::Metadata(step) => {
+                    self.save_metadata_step(step)?;
+                    save.stage = if step + 1 >= METADATA_STEPS {
+                        AutosaveStage::Writes
+                    } else {
+                        AutosaveStage::Metadata(step + 1)
+                    };
                 }
                 AutosaveStage::Writes => {
                     finished = self.save.write_some(SNAPSHOT_BUDGET)?;
@@ -208,8 +243,43 @@ impl Game<'_> {
             log::warn!("Horizon: autosave failed: {error}");
             return Ok(());
         }
+        let elapsed = started.elapsed();
+        if elapsed > SLOW_STEP {
+            log::info!("Horizon: autosave step {step} took {elapsed:?}");
+        }
         if !finished {
             self.pending_autosave = Some(save);
+        }
+        Ok(())
+    }
+
+    /// One step of `save_game_metadata`, so no single frame writes every file
+    /// of the level at once. The order is the one it had in one call; a step
+    /// that fails is reported like the whole call's failure was.
+    fn save_metadata_step(&mut self, step: u8) -> Result<()> {
+        match step {
+            0 => {
+                self.prune_entity_memory();
+                self.save_raids();
+                self.save.save_forced_chunks(&self.streaming.forced)?;
+            }
+            1 => self.save_maps(),
+            2 => self.save_random_sequences(),
+            3 => self.save_fight(),
+            4 => self.save_wandering_trader(),
+            5 => self.save_portal_arrivals(),
+            6 => self.save_stats(),
+            7 => self.save_advancements(),
+            8 => self.save_scoreboard(),
+            9 => self.save_bossbars(),
+            10 => self.save_schedule(),
+            11 => self.save_warden_tracker(),
+            _ => {
+                self.sync_level();
+                self.store_owner();
+                self.level.write(&self.world_root)?;
+                self.save_world_state();
+            }
         }
         Ok(())
     }
@@ -282,12 +352,26 @@ impl Game<'_> {
                         }
                     }
                     if keys.is_empty() {
-                        self.prune_entity_memory();
-                        self.save_raids();
-                        self.save.save_forced_chunks(&self.streaming.forced)?;
-                        self.save_game_metadata()?;
-                        save.stage = Stage::Writes;
+                        save.stage = Stage::Metadata(0);
                     }
+                    Ok(false)
+                }
+                Stage::Metadata(step) => {
+                    let step = *step;
+                    let started = Instant::now();
+                    self.save_metadata_step(step)?;
+                    if started.elapsed() > SLOW_STEP {
+                        let name = METADATA_NAMES
+                            .get(usize::from(step))
+                            .copied()
+                            .unwrap_or("level");
+                        log::info!("Horizon: save step {name} took {:?}", started.elapsed());
+                    }
+                    save.stage = if step + 1 >= METADATA_STEPS {
+                        Stage::Writes
+                    } else {
+                        Stage::Metadata(step + 1)
+                    };
                     Ok(false)
                 }
                 Stage::Writes => self.save.write_some(SNAPSHOT_BUDGET),
@@ -346,6 +430,10 @@ impl Game<'_> {
         let progress = match self.pending_save.as_ref().map(|save| &save.stage) {
             Some(Stage::Chunks(_)) => 0.25,
             Some(Stage::Entities(_)) => 0.5,
+            // The metadata steps are the second half of the bar: a file each.
+            Some(Stage::Metadata(step)) => {
+                0.5 + 0.4 * (f32::from(*step) + 1.0) / f32::from(METADATA_STEPS)
+            }
             Some(Stage::Writes) => 0.9,
             _ => 0.0,
         };

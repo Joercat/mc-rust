@@ -283,7 +283,14 @@ async function openPage(context, url, label) {
   page.on("console", (message) => {
     const line = `${message.type()}: ${message.text()}`;
     consoleLines.push(line);
-    if (message.type() === "error" || /Atomics\.wait/.test(line)) console.log(`  [${label}] ${line}`);
+    // The engine's own log (a slow frame or save step says so itself) and every
+    // error: the timing lines are the point of running the page for real.
+    if (
+      message.type() === "error" ||
+      /Atomics\.wait|\[horizon\].*took/.test(line)
+    ) {
+      console.log(`  [${label}] ${line}`);
+    }
   });
   page.on("pageerror", (error) => {
     errors.push(String(error && error.stack ? error.stack : error));
