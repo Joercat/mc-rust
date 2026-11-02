@@ -25,6 +25,19 @@ services:
       - path: /*
         name: Cross-Origin-Embedder-Policy
         value: require-corp
+      # The page and its glue have no build stamp in their own path: the
+      # engines' `?v=` stamp lives in `app.js`. A cached copy of these keeps a
+      # player on an older engine after a deploy — including one whose bug is
+      # fixed — so they are revalidated every load.
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache
+      - path: /app.js
+        name: Cache-Control
+        value: no-cache
+      - path: /threads.js
+        name: Cache-Control
+        value: no-cache
       # The pack is fetched on every load and changes when it is repacked, so a
       # stored copy must be revalidated rather than outliving its build.
       - path: /horizon-vfs.bin

@@ -93,6 +93,9 @@ worst call block, old spin-until-answer: 150.152898ms
 answered 80, budget-exceeded 40, lost 0; server latency 150ms
 ```
 
+Two runs of the same harness gave 17 µs and 28 µs worst-frame, so read the
+deferred figure as tens of microseconds against a 150 ms round trip.
+
 That is the deferral, not the game: it proves the frame never waits longer than
 a few microseconds for a 150 ms round trip, and that a request whose budget ran
 out is still answered. It does not measure opening a chest in a browser.
