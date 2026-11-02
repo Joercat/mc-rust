@@ -225,6 +225,21 @@ files at all, the page stops with the same message the desktop client gives.
   prints the counts: one manifest and one request per asset on a first load,
   none on a second, and after a rebuild that changed one file, the manifest and
   that file only.
+  `scripts/web_browser_check.mjs` does the same in a real browser: it loads the
+  live URL in headless Chromium with `?world=`, waits for the game to report
+  `playing`, forces save cycles, places and opens a chest with the game's own
+  command and a right-click, and reloads to count what the second load fetches
+  (nothing: the engine and the 400 MB pack come from IndexedDB). It needs
+  Playwright and a Chromium, which are not project dependencies:
+
+  ```
+  npm i playwright && npx playwright install chromium      # in a scratch folder
+  PLAYWRIGHT_PATH=$PWD/scratch/node_modules/playwright/index.js \
+    node scripts/web_browser_check.mjs https://horizon-web-pna6.onrender.com/
+  ```
+
+  The status readout the script polls is refreshed once a second; the script
+  speeds that one timer up so a container open is timed to tens of milliseconds.
 - The threaded module needs a nightly toolchain with `rust-src`
   (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
   to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to
