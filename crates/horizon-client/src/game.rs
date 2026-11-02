@@ -3873,6 +3873,7 @@ impl Game<'_> {
     }
     /// Menus opened by PlayerEffect::OpenMenu.
     fn open_menu(&mut self, pos: [i32; 3]) {
+        let opened = Instant::now();
         let name = self
             .res
             .facts()
@@ -3966,6 +3967,7 @@ impl Game<'_> {
         self.screen = Screen::Inventory;
         self.capture(false);
         self.right = false;
+        log::info!("Horizon: container opened in {:?}", opened.elapsed());
     }
     /// FallingBlockEntity.tick: fall with 0.04 gravity and 0.98 drag, then land.
     fn tick_falling(&mut self) -> Result<()> {
@@ -14227,6 +14229,25 @@ impl ApplicationHandler for Game<'_> {
                     if rendered {
                         self.frame_stats.record(elapsed.as_secs_f32() * 1000.0);
                         self.debug_charts.frame_times.log(elapsed.as_nanos() as i64);
+                        // A frame this slow is a freeze a player feels. Say how
+                        // slow and what the frame was doing, so the next report
+                        // of "it stutters" comes with its cause.
+                        let frame_ms = elapsed.as_secs_f32() * 1000.0;
+                        if frame_ms > 100.0 {
+                            let screen = match self.screen {
+                                Screen::Playing => "playing",
+                                Screen::Inventory => "container",
+                                Screen::Creative => "creative",
+                                _ => "menu",
+                            };
+                            log::info!(
+                                "Horizon: frame took {frame_ms:.0} ms (screen {screen}, container {}, autosave {}, save {}, chunks {})",
+                                self.container.is_some(),
+                                self.pending_autosave.is_some(),
+                                self.pending_save.is_some(),
+                                self.world.chunks.len(),
+                            );
+                        }
                         if self.frames == 0 {
                             // The launcher times Play to this line (launcher/src/perf.rs).
                             log::info!(
