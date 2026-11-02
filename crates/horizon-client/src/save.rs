@@ -2270,8 +2270,28 @@ impl SaveDir {
             #[cfg(target_arch = "wasm32")]
             {
                 // Not here: a frame is not where a region file is written.
-                // `write_some` takes this a few milliseconds at a time.
-                horizon_core::sync::lock(&self.queued).push_back((folder, batch));
+                // `write_some` takes this a few milliseconds at a time, and a
+                // batch is handed out whole, so it is split here: one write is
+                // never more than a couple of chunks (a batch of twenty cost
+                // 113 ms in one frame).
+                const PER_WRITE: usize = 2;
+                let mut rest = batch;
+                let mut pieces = 0usize;
+                let mut queued = horizon_core::sync::lock(&self.queued);
+                while !rest.is_empty() {
+                    let tail = if rest.len() > PER_WRITE {
+                        rest.split_off(PER_WRITE)
+                    } else {
+                        Vec::new()
+                    };
+                    queued.push_back((folder, std::mem::take(&mut rest)));
+                    rest = tail;
+                    pieces += 1;
+                }
+                drop(queued);
+                if pieces > 1 {
+                    *horizon_core::sync::lock(&self.outstanding.count) += pieces - 1;
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             let mut writer = horizon_core::sync::lock(&self.writer);

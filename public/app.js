@@ -66,7 +66,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.37";
+const BUILD = "2026-11-01.38";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -457,6 +457,13 @@ async function boot() {
   }, 1000);
   // The harness's arena-full test: the next n section placements fail, and
   // the section stays drawn from its old mesh while the new one waits.
+  window.__horizonDebugMove = (steps) => {
+    try {
+      wasm.horizon_web_debug_move(steps >>> 0);
+    } catch (e) {
+      /* an older engine: nothing to move */
+    }
+  };
   window.__horizonForceUploads = (n) => {
     try {
       wasm.horizon_web_force_upload_failures(n >>> 0);

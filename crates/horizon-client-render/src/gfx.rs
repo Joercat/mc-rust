@@ -3080,6 +3080,10 @@ impl Renderer {
         ((c.entities && !c.only_player) || c.blocks, c.entities)
     }
 
+    /// Section draws submitted last frame.
+    pub fn draw_calls(&self) -> usize {
+        self.draws.len()
+    }
     /// Sections placed on the GPU.
     pub fn sections_len(&self) -> usize {
         self.sections.len()

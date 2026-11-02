@@ -14129,6 +14129,19 @@ impl ApplicationHandler for Game<'_> {
                         horizon_client::spans::time("update_world", || self.update_world());
                         horizon_client::spans::time("spawn_player", || self.spawn_player())?;
                     }
+                    // The harness's chunk crossing: four blocks a frame, no
+                    // input delivery involved (keys and chat teleports never
+                    // reached the game in a headless session).
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let steps = WEB_DEBUG_MOVE.load(std::sync::atomic::Ordering::Relaxed);
+                        if steps > 0
+                            && let Some(player) = self.player.as_mut()
+                        {
+                            player.position.x += 4.0;
+                            WEB_DEBUG_MOVE.store(steps - 1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                     let updated = Instant::now();
                     self.track_toggle_screens();
                     // For the "I'm playing" ping: an atomic, sent on when it changes.
@@ -16437,8 +16450,16 @@ static WEB_SAVE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// (the browser harness sets it; nothing in the game does).
 static WEB_FORCE_UPLOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Blocks the next frames step the player by (the harness cannot deliver
+/// movement keys headless, so it drives the player from inside the loop).
+static WEB_DEBUG_MOVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Asks the next frame to save the world (a hidden or closing page).
 #[cfg(target_arch = "wasm32")]
+pub fn request_web_debug_move(steps: u32) {
+    WEB_DEBUG_MOVE.store(steps, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn request_web_force_uploads(n: u32) {
     WEB_FORCE_UPLOADS.store(n, std::sync::atomic::Ordering::Relaxed);
 }
@@ -16498,6 +16519,7 @@ fn update_web_status(game: &Game<'_>) {
             "sections": r.sections_len(),
             "detail_sections": r.detail_sections(),
             "deferred_uploads": r.deferred_uploads(),
+            "draws": r.draw_calls(),
         })
     });
     let json = serde_json::json!({

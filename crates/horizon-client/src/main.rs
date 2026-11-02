@@ -147,6 +147,14 @@ mod web_entry {
 
     /// Fail the next `n` section placements, to prove a full terrain arena
     /// leaves no section undrawn (the browser harness calls this).
+    /// Step the player four blocks a frame for `steps` frames: the harness's
+    /// chunk crossing, driven from inside the game loop.
+    #[wasm_bindgen]
+    pub fn horizon_web_debug_move(steps: u32) {
+        install_hooks();
+        crate::game::request_web_debug_move(steps);
+    }
+
     #[wasm_bindgen]
     pub fn horizon_web_force_upload_failures(n: u32) {
         install_hooks();

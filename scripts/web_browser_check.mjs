@@ -403,39 +403,20 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
   });
   if (forceFailures > 0) await page.evaluate((n) => window.__horizonForceUploads(n), forceFailures);
   const from = await page.evaluate(() => performance.now());
-  const sprint = async (ms, synthetic) => {
-    const started = Date.now();
-    const canvasEvent = (type) =>
-      page.evaluate(
-        ([kind]) =>
-          document
-            .getElementById("horizon-canvas")
-            .dispatchEvent(new KeyboardEvent(kind, { key: "w", code: "KeyW", bubbles: true })),
-        [type],
-      );
-    if (synthetic) await canvasEvent("keydown");
-    else await page.keyboard.down("w");
-    let state = before;
-    while (Date.now() - started < ms) {
-      await new Promise((r) => setTimeout(r, 1500));
-      state = await status(page);
-    }
-    if (synthetic) await canvasEvent("keyup");
-    else await page.keyboard.up("w");
-    return state;
-  };
   const pos = (state) => (state && Array.isArray(state.player) ? state.player : null);
   const gap = (a, b) => (a && b ? Math.hypot(b[0] - a[0], b[2] - a[2]) : 0);
-  let after = await sprint(24_000, false);
-  let moved = gap(pos(before), pos(after));
-  let how = "keys";
-  if (moved < 8) {
-    // Real key events may be swallowed before they reach winit; the page's own
-    // function keys are dispatched on the canvas, so try that path too.
-    after = await sprint(10_000, true);
-    moved = gap(pos(before), pos(after));
-    how = "synthetic";
+  // The player is stepped from inside the game loop: headless key delivery,
+  // synthetic canvas events and chat teleports all failed to move it.
+  await page.evaluate(() => window.__horizonDebugMove(240));
+  let after = before;
+  const crossingUntil = Date.now() + 26_000;
+  while (Date.now() < crossingUntil) {
+    await new Promise((r) => setTimeout(r, 1500));
+    after = await status(page);
+    if ((after.generated || 0) - (before.generated || 0) >= 24) break;
   }
+  const moved = gap(pos(before), pos(after));
+  const how = "debug-move";
   const to = await page.evaluate(() => performance.now());
   const task = await worstTask(page, from, to);
   const worstGap = await page.evaluate(() => Math.round(window.__frames.worst));
@@ -587,10 +568,12 @@ async function runSession({ label, stripIsolation, reload }) {
   if (again.opened && again.ms > 1000) fail(`${label}: the second container open took ${again.ms} ms`);
   if (!worldState || worldState.state !== "playing") fail(`${label}: the page never reached the game's playing state`);
   if (!(autosaved.count > beforeAutosave.count)) fail(`${label}: the engine's autosave wrote nothing`);
-  if (travel.moved < 8) {
-    fail(`${label}: holding W moved ${travel.moved.toFixed(1)} blocks, so the chunk-crossing phase never ran`);
+  if (travel.moved < 20) {
+    fail(`${label}: the crossing moved ${travel.moved.toFixed(1)} blocks; it must cross at least 20`);
   }
-  if (travel.generated === 0 && travel.resident <= 0) fail(`${label}: holding W loaded no chunk, so nothing was measured`);
+  if (travel.generated < 20) {
+    fail(`${label}: the crossing generated ${travel.generated} column(s); at least 20 were expected`);
+  }
   if (travel.pending > 0) fail(`${label}: ${travel.pending} section upload(s) never found room after a load burst`);
   if (travel.detail < travel.sections) {
     fail(`${label}: ${travel.sections - travel.detail} section(s) placed but not drawn after a load burst`);
