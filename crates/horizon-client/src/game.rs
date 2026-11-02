@@ -16562,6 +16562,10 @@ pub async fn run_web(
         server_thread: false,
         execution_role: execution_role::ExecutionRole::Client,
     };
+    // The web build has no env var to opt into diagnostics: always record the
+    // frame's named spans so a stutter can be attributed to the system that
+    // caused it. Startup enables this only for the desktop path.
+    horizon_client::spans::enable(true);
 
     let win_dom = web_sys::window().ok_or("missing browser window")?;
     let doc = win_dom.document().ok_or("missing document")?;
