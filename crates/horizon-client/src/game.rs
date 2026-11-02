@@ -14119,6 +14119,10 @@ impl ApplicationHandler for Game<'_> {
                     // tick's length, the rest are dropped (`FixedStep::tick_fits`).
                     let in_frame = self.remote.is_none();
                     let mut spent = Duration::ZERO;
+                    // Ticks this frame actually ran, counted where they run:
+                    // `steps` is only what the clock asked for, so it cannot
+                    // show whether the catch-up bound held.
+                    let mut ran = 0u32;
                     // A frame catches up at most this many ticks after a stall.
                     // Catching up is exempt from the per-tick budget above (a
                     // sprinting clock), so a long stall used to run ten ticks
@@ -14155,6 +14159,7 @@ impl ApplicationHandler for Game<'_> {
                         self.tick_sound_engine();
                         self.clock.record(started.elapsed());
                         spent += started.elapsed();
+                        ran += 1;
                         if let Some(report) = self.clock.take_sprint_report() {
                             self.sprint_report(&report);
                         }
@@ -14182,7 +14187,7 @@ impl ApplicationHandler for Game<'_> {
                                     format!(", cpu {:.1} ms", (end - start).as_secs_f32() * 1000.0)
                                 });
                             log::info!(
-                                "Horizon: slow frame {cpu:.1} ms{worked} ({steps} ticks): {}",
+                                "Horizon: slow frame {cpu:.1} ms{worked} ({ran} of {steps} ticks): {}",
                                 horizon_client::spans::describe(&spans)
                             );
                         }
