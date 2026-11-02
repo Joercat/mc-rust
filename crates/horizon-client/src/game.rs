@@ -16544,7 +16544,14 @@ pub async fn run_web(
         dimension: None,
         no_pause: false,
         control: None,
-        spikes: None,
+        // On the web there is no env var to opt into diagnostics, so always
+        // collect the frame's named spans and log a frame's work once it is
+        // long enough to be a stutter.
+        spikes: if cfg!(target_arch = "wasm32") {
+            Some(75.0)
+        } else {
+            None
+        },
         offscreen: false,
         window_size: [width.max(320), height.max(240)],
         server: None,

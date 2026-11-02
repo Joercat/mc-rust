@@ -290,7 +290,7 @@ async function openPage(context, url, label) {
     // error: the timing lines are the point of running the page for real.
     if (
       message.type() === "error" ||
-      /Atomics\.wait|(container opened|frame update|handler took|save step|autosave step|save write|save drain|mirror slice|took [0-9])/.test(
+      /Atomics\.wait|(container opened|frame update|slow frame|handler took|save step|autosave step|save write|save drain|mirror slice|took [0-9])/.test(
         line,
       )
     ) {
