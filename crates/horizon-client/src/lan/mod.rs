@@ -529,15 +529,32 @@ impl Lan {
     pub fn connect_local(&self) -> io::Result<horizon_protocol::connection::Pipe> {
         let (client, server) = horizon_protocol::connection::Pipe::pair();
         let shared = self.shared.clone();
-        std::thread::Builder::new()
-            .name("horizon-local-conn".into())
-            .spawn(move || {
-                if let Err(e) = conn::serve_local(server, shared)
-                    && std::env::var_os("HORIZON_NET_DEBUG").is_some()
-                {
-                    log::warn!("[lan] local: {e}");
-                }
-            })?;
+        let local = move || {
+            if let Err(e) = conn::serve_local(server, shared)
+                && std::env::var_os("HORIZON_NET_DEBUG").is_some()
+            {
+                log::warn!("[lan] local: {e}");
+            }
+        };
+        // The memory connection's server end lives as long as the connection
+        // and may park: on the web that is a page worker (the main thread may
+        // not park, and wasm's std threads cannot be spawned at all), while
+        // elsewhere it is its own thread.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            if !horizon_threads::spawn_detached(local) {
+                return Err(io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "the page's worker pool never started a worker for the connection",
+                ));
+            }
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        {
+            std::thread::Builder::new()
+                .name("horizon-local-conn".into())
+                .spawn(local)?;
+        }
         Ok(client)
     }
     /// Everything the connection threads reported since the last call.
