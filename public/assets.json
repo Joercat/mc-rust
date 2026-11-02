@@ -1,0 +1,14 @@
+{
+  "build": "2026-11-01.14",
+  "files": {
+    "index.html": "c1f7d5af78285f5bb744ca0ff39174fd00cb533011a63c42245b7f5808a3fc25",
+    "app.js": "d797cf2f65cfe3521dcb272aa7c0b238ca9cd9d41b6d3a122674651be52607d7",
+    "threads.js": "d5c603777f2e88567774c172e6be66a7c21b21617d9c4880a3949c2281de7693",
+    "thread-worker.js": "863fe35f3ba85508fe5d962a5c25a896574150fb13c33b49321b43b8b0a8842b",
+    "asset-cache.js": "0d444212b967911c01560b870885495b304ed6efdb1153d9d5095ec80f3521a7",
+    "horizon-client.js": "ac9099ab3bcc6f6a8f8fdd6cffe30d2bcbb37db1819eb7121e8aa458f21391a1",
+    "horizon-client_bg.wasm": "bb3e03086f8e5a211fb3d005f0179497ef800f8694f06dd72e508d9764d53eda",
+    "horizon-client-threaded.js": "92dc0a6978060b850cfeba4a0d64d7791aa10f487b3c067d419f65d572d74b66",
+    "horizon-client-threaded_bg.wasm": "57933c3abbeb076ec72089dafce2fae966ca037e6d75fd87afd59d80c83a9ce1"
+  }
+}
