@@ -546,23 +546,27 @@ impl Game<'_> {
             .filter(|(_, c)| c.fresh && c.lit)
             .map(|(k, _)| *k)
             .collect();
-        for key in fresh {
-            if let Some(c) = self.world.chunks.get_mut(&key) {
-                Arc::make_mut(c).fresh = false;
+        horizon_client::spans::time("creatures_fresh", || {
+            for key in fresh {
+                if let Some(c) = self.world.chunks.get_mut(&key) {
+                    Arc::make_mut(c).fresh = false;
+                }
+                self.spawn_generation_creatures(key.0, key.1);
             }
-            self.spawn_generation_creatures(key.0, key.1);
-        }
-        self.tick_leads();
-        self.spawn_natural();
+        });
+        horizon_client::spans::time("creatures_leads", || self.tick_leads());
+        horizon_client::spans::time("creatures_spawn", || self.spawn_natural());
         // ServerChunkCache.tickChunks: the custom spawners tick only with spawn_mobs.
         if self.ui.rules.bool("spawn_mobs") {
-            self.tick_wandering_trader();
-            self.tick_patrol_spawner();
-            self.tick_cat_spawner();
-            self.tick_village_siege();
+            horizon_client::spans::time("creatures_spawners", || {
+                self.tick_wandering_trader();
+                self.tick_patrol_spawner();
+                self.tick_cat_spawner();
+                self.tick_village_siege();
+            });
         }
-        self.tick_raids();
-        self.tick_creature_entities()
+        horizon_client::spans::time("creatures_raids", || self.tick_raids());
+        horizon_client::spans::time("creatures_ticks", || self.tick_creature_entities())
     }
     /// `DistanceManager.inEntityTickingRange` in an entity-ticking chunk
     /// (block coordinates), from every player's tickets (`update_chunk_tickets`).
@@ -622,7 +626,7 @@ impl Game<'_> {
             // it) and taken back after their ticks.
             let mut scratch = self.world.random.clone();
             let mut pushes = horizon_client::mobs::PendingPushes::default();
-            let mut keep = Vec::with_capacity(mobs.len());
+            let mut keep = vec![true; mobs.len()];
             let mut grid =
                 horizon_client::mobs::seen_grid::SeenGrid::new(snapshot.iter().map(|s| s.bounds));
             // All but the snapshot is the same for every mob of the tick, so
@@ -634,7 +638,46 @@ impl Game<'_> {
             for (i, s) in snapshot.iter().enumerate() {
                 index.entry(s.id).or_insert(i as u32);
             }
-            for i in 0..mobs.len() {
+            // A frame's mob work is capped, in order of how near the player
+            // each mob is: a world's first tick after a stall used to hold the
+            // frame for a third of a second. Mobs past the allowance keep
+            // their state and tick on the next tick, so a heavy world slows
+            // itself down instead of the frame.
+            #[cfg(target_arch = "wasm32")]
+            const MOB_BUDGET_MS: u64 = 6;
+            #[cfg(target_arch = "wasm32")]
+            let mob_deadline = Some(
+                horizon_core::time::Instant::now()
+                    + std::time::Duration::from_millis(MOB_BUDGET_MS),
+            );
+            #[cfg(not(target_arch = "wasm32"))]
+            let mob_deadline: Option<horizon_core::time::Instant> = None;
+            #[cfg(target_arch = "wasm32")]
+            let mut order: Vec<u32> = (0..mobs.len() as u32).collect();
+            #[cfg(not(target_arch = "wasm32"))]
+            let order: Vec<u32> = (0..mobs.len() as u32).collect();
+            #[cfg(target_arch = "wasm32")]
+            if order.len() > 1
+                && let Some(at) = players.first().map(|p| p.position)
+                && mobs.len() > 64
+            {
+                let far = |m: &horizon_client::mobs::Mob| {
+                    let dx = m.position.x - at.x;
+                    let dy = m.position.y - at.y;
+                    let dz = m.position.z - at.z;
+                    dx * dx + dy * dy + dz * dz
+                };
+                let mut nearest: Vec<(f64, u32)> =
+                    order.iter().map(|&i| (far(&mobs[i as usize]), i)).collect();
+                nearest.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                order = nearest.into_iter().map(|(_, i)| i).collect();
+            }
+            for (n, &slot) in order.iter().enumerate() {
+                if n > 0 && mob_deadline.is_some_and(|d| horizon_core::time::Instant::now() >= d)
+                {
+                    break;
+                }
+                let i = slot as usize;
                 let mut w = MobWorld {
                     others: &snapshot,
                     others_grid: Some(&grid),
@@ -672,7 +715,7 @@ impl Game<'_> {
                     .world
                     .loaded(m.position.x.floor() as i32, m.position.z.floor() as i32)
                 {
-                    keep.push(!m.hostile() || m.persistent);
+                    keep[i] = !m.hostile() || m.persistent;
                     continue;
                 }
                 // ServerLevel.tick: every loaded entity checks despawning, but
@@ -684,7 +727,7 @@ impl Game<'_> {
                         died.remove(&m.id);
                         snapshot[i].alive = false;
                     }
-                    keep.push(kept);
+                    keep[i] = kept;
                     continue;
                 }
                 horizon_client::mobs::apply_mob_pushes(m, &mut pushes);
@@ -731,7 +774,7 @@ impl Game<'_> {
                 if !kept {
                     died.remove(&m.id);
                 }
-                keep.push(kept);
+                keep[i] = kept;
                 // ServerLevel ticks entities one after another: the ones
                 // after this mob see it as it is now.
                 snapshot[i] = seen(m, uuid);
