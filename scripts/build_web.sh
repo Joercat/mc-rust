@@ -281,6 +281,9 @@ if [ "$threads_failed" -ne 0 ] && [ -z "${HORIZON_NIGHTLY:-}" ] \
   done
 fi
 
+# The page's cache is keyed on content hashes, so record what was published.
+bash scripts/web_manifest.sh
+
 echo "published public/horizon-client.js and public/horizon-client_bg.wasm"
 echo "serve with: python3 scripts/serve_web.py 5173"
 

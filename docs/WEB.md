@@ -210,13 +210,21 @@ files at all, the page stops with the same message the desktop client gives.
   is far faster. The FPS readout reflects that.
 - Worlds live in the browser's IndexedDB, not in files: clearing site data
   deletes them.
-- The engine's wasm module and the resource pack are kept in a second IndexedDB
-  database (`horizon-web-cache`), so a reload compiles and mounts from the disk
-  copy instead of downloading tens of megabytes again. Their URLs carry the
-  build stamp (`?v=BUILD`), and each stored copy is revalidated with a
-  conditional request, so a repacked file under the same stamp is fetched once;
-  `?nocache=1` skips the stored copy. A browser that refuses the storage (a
-  private window, no quota) says so and downloads as before.
+- The engine's wasm module, its glue and the resource pack are kept in a second
+  IndexedDB database (`horizon-web-assets`), keyed by the SHA-256 that
+  `scripts/web_manifest.sh` records in `public/assets.json` for every published
+  file. A second load fetches nothing at all for a file it already has — no GET,
+  not even a HEAD — and a rebuild fetches the manifest plus only the files whose
+  hash changed; a stored copy cannot answer for a different hash, because the
+  hash is the key. The manifest names the build stamp the page's own code
+  carries, so a record from another build is never consulted. `?nocache=1`
+  skips the stored copy and refreshes it, and a browser that refuses the
+  storage (a private window, no quota) says so and downloads as before.
+  `scripts/asset_cache_check.mjs` drives the page's real cache
+  (`public/asset-cache.js`) against a stubbed host and an emulated IndexedDB and
+  prints the counts: one manifest and one request per asset on a first load,
+  none on a second, and after a rebuild that changed one file, the manifest and
+  that file only.
 - The threaded module needs a nightly toolchain with `rust-src`
   (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
   to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to

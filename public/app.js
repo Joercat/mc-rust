@@ -2,6 +2,7 @@
 // `/game` folder from IndexedDB, starts the real Horizon client, then keeps the
 // browser's storage in sync with the files the game writes.
 import { startThreadPool } from "./threads.js";
+import { createAssetCache } from "./asset-cache.js";
 
 const bootEl = document.getElementById("boot");
 const barEl = document.querySelector("#bar > i");
@@ -65,7 +66,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.13";
+const BUILD = "2026-11-01.14";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -82,11 +83,14 @@ const ENGINES = {
   },
 };
 
-async function present(url) {
+/// Whether this build has `name`. The build's manifest answers that without a
+/// request; a host with no manifest is asked with a HEAD, where only a definite
+/// "no such file" counts (a refused HEAD is not a missing build).
+async function present(cache, name) {
+  const known = await cache.has(name).catch(() => null);
+  if (known !== null) return known;
   try {
-    // Only a definite "no such file" counts: a host that refuses HEAD (405)
-    // must not read as a missing build.
-    const response = await fetch(url, { method: "HEAD" });
+    const response = await fetch(withBuild(name), { method: "HEAD" });
     return response.status !== 404 && response.status !== 410;
   } catch {
     return false;
@@ -122,10 +126,10 @@ async function isolationProblem() {
   return "this page is embedded by one that is not isolated";
 }
 
-async function chooseEngine() {
+async function chooseEngine(cache) {
   const isolated =
     globalThis.crossOriginIsolated === true && typeof SharedArrayBuffer !== "undefined";
-  if (isolated && (await present(withBuild(ENGINES.threaded.glue)))) {
+  if (isolated && (await present(cache, ENGINES.threaded.glue))) {
     return { ...ENGINES.threaded, threaded: true };
   }
   if (isolated) say("threaded engine not built: using the single-threaded one");
@@ -173,22 +177,16 @@ function pickQuality(params) {
   say(`fast settings: ${cores} threads, ${memory} GB`);
 }
 
-async function loadEngine() {
-  const engine = await chooseEngine();
+async function loadEngine(cache) {
+  const engine = await chooseEngine(cache);
   const missing = [];
   for (const [path, what] of [
     [engine.glue, "the wasm-bindgen glue"],
     [engine.wasm, "the compiled client"],
     ["./horizon-vfs.bin", "the resource pack"],
   ]) {
-    try {
-      const response = await fetch(withBuild(path), { method: "HEAD" });
-      if (response.status === 404 || response.status === 410) {
-        missing.push(`  ${path.slice(2)} — ${what} (HTTP ${response.status})`);
-      }
-    } catch (error) {
-      missing.push(`  ${path.slice(2)} — ${what} (${error})`);
-    }
+    if ((await present(cache, path)) === true) continue;
+    missing.push(`  ${path.slice(2)} — ${what}`);
   }
   if (missing.length > 0) {
     throw new Error(
@@ -199,10 +197,26 @@ async function loadEngine() {
         "(needs the wasm32 Rust toolchain; see docs/WEB.md for the prerequisites)",
     );
   }
-  const module = await import(withBuild(engine.glue).href);
+  // The glue is a build output like the wasm, so it comes through the same
+  // content cache: a blob module is the one way to run stored bytes as a
+  // module, and it has no relative imports of its own to resolve.
+  let module = null;
+  let glueUrl = withBuild(engine.glue).href;
+  try {
+    const glue = await cache.bytes(engine.glue);
+    glueUrl = URL.createObjectURL(new Blob([glue.bytes], { type: "text/javascript" }));
+    module = await import(glueUrl);
+    say(`wasm-bindgen glue${glue.cached ? " from the cache" : ""}`);
+  } catch (error) {
+    // A browser that will not import a blob module, or an unusable cache: the
+    // glue's own URL is still a module.
+    console.warn("[horizon] glue from the cache failed; importing it by URL", error);
+    glueUrl = withBuild(engine.glue).href;
+    module = await import(glueUrl);
+  }
   wasm = module;
   init = module.default;
-  return engine;
+  return { ...engine, glueUrl };
 }
 
 // ---------------------------------------------------------------------------
@@ -252,156 +266,6 @@ function deleteFiles(db, paths) {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
-}
-
-// ---------------------------------------------------------------------------
-// IndexedDB cache for the two big downloads: the engine's wasm module (~33 MB)
-// and the resource pack (~33 MB, hundreds on a full one). They change only when
-// `scripts/build_web.sh` publishes a new build, and their URL carries that
-// build's stamp (`?v=BUILD`), so a stored copy is used unless the host says it
-// changed — a conditional request then costs a few hundred bytes instead of the
-// whole file. `?nocache=1` ignores the cache (and refreshes it).
-// ---------------------------------------------------------------------------
-const CACHE_DB = "horizon-web-cache";
-const CACHE_STORE = "binaries";
-
-function openCache() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(CACHE_DB, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(CACHE_STORE)) {
-        db.createObjectStore(CACHE_STORE, { keyPath: "url" });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function readCached(db, url) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(CACHE_STORE, "readonly");
-    const request = tx.objectStore(CACHE_STORE).get(url);
-    request.onsuccess = () => resolve(request.result || null);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function writeCached(db, record) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(CACHE_STORE, "readwrite");
-    tx.objectStore(CACHE_STORE).put(record);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-function forgetCached(db, urls) {
-  return new Promise((resolve, reject) => {
-    if (urls.length === 0) return resolve();
-    const tx = db.transaction(CACHE_STORE, "readwrite");
-    for (const url of urls) tx.objectStore(CACHE_STORE).delete(url);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-/// Drops every stored copy that this boot did not use: an engine or pack from
-/// another build stamp, which would otherwise hold its megabytes of quota.
-async function pruneCache(db, keep) {
-  try {
-    const keys = await new Promise((resolve, reject) => {
-      const tx = db.transaction(CACHE_STORE, "readonly");
-      const request = tx.objectStore(CACHE_STORE).getAllKeys();
-      request.onsuccess = () => resolve(request.result || []);
-      request.onerror = () => reject(request.error);
-    });
-    await forgetCached(db, keys.filter((key) => !keep.has(key)));
-  } catch (error) {
-    console.warn("[horizon] could not prune the download cache", error);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Boot.
-// ---------------------------------------------------------------------------
-async function readBody(response, onProgress) {
-  const total = Number(response.headers.get("content-length") || 0);
-  if (!response.body || total === 0) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    onProgress(1);
-    return bytes;
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    onProgress(received / total);
-  }
-  const out = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
-
-/// The bytes at `url`, from IndexedDB when it is still current: `{ bytes,
-/// cached }`. The stored copy is revalidated with a conditional request, so a
-/// repacked file under the same build stamp is still fetched once.
-async function fetchAsset(db, url, onProgress) {
-  const key = url.href;
-  const useCache = db !== null && new URLSearchParams(window.location.search).get("nocache") !== "1";
-  let stored = null;
-  if (useCache) {
-    try {
-      stored = await readCached(db, key);
-    } catch (error) {
-      console.warn("[horizon] could not read the download cache", error);
-    }
-  }
-  const headers = {};
-  if (stored && stored.etag) headers["if-none-match"] = stored.etag;
-  else if (stored && stored.lastModified) headers["if-modified-since"] = stored.lastModified;
-  let response = null;
-  try {
-    response = await fetch(url, { headers, cache: "no-cache" });
-  } catch (error) {
-    // Offline, or the host refused the conditional request: a stored copy is
-    // still the build this page was made for.
-    if (!stored) throw error;
-    onProgress(1);
-    return { bytes: new Uint8Array(await stored.bytes.arrayBuffer()), cached: true };
-  }
-  if (response.status === 304 && stored) {
-    onProgress(1);
-    return { bytes: new Uint8Array(await stored.bytes.arrayBuffer()), cached: true };
-  }
-  if (!response.ok) throw new Error(`${url.href}: HTTP ${response.status}`);
-  const bytes = await readBody(response, onProgress);
-  if (useCache) {
-    const record = {
-      url: key,
-      // A Blob is stored on disk rather than in the IndexedDB heap.
-      bytes: new Blob([bytes]),
-      etag: response.headers.get("etag") || "",
-      lastModified: response.headers.get("last-modified") || "",
-      size: bytes.length,
-      stamp: BUILD,
-      at: Date.now(),
-    };
-    // Not awaited: the game should start while the copy is written.
-    writeCached(db, record).catch((error) =>
-      console.warn("[horizon] could not store a download", error),
-    );
-  }
-  return { bytes, cached: false };
 }
 
 // A save makes the game hand over every file it wrote (region files and all) in
@@ -457,7 +321,7 @@ async function startEngineThreads(engine) {
     const workers = await startThreadPool({
       module: handles[0],
       memory: handles[1],
-      glueUrl: withBuild(engine.glue).href,
+      glueUrl: engine.glueUrl || withBuild(engine.glue).href,
       count,
     });
     say(`worker threads: ${workers.length}`);
@@ -469,19 +333,23 @@ async function startEngineThreads(engine) {
 
 async function boot() {
   phase("looking for the engine…", 0.01);
-  const engine = await loadEngine();
+  // The build's assets, from the content-addressed cache when this browser
+  // already has those bytes. A cache it cannot open leaves every `bytes` call
+  // on the network, which is slow but works.
+  const cache = createAssetCache({
+    fetchImpl: (url, options) => fetch(url, options),
+    origin: import.meta.url,
+    build: BUILD,
+    nocache: new URLSearchParams(location.search).get("nocache") === "1",
+  });
+  await cache.open();
+  const engine = await loadEngine(cache);
 
   phase("opening browser storage…", 0.02);
   const db = await openDb();
-  const cache = await openCache().catch((error) => {
-    // A browser in a private window, or one out of quota: the page still runs,
-    // it just downloads the engine and the pack on every load.
-    console.warn("[horizon] no download cache", error);
-    return null;
-  });
 
   phase("loading engine…", 0.03);
-  const engineAsset = await fetchAsset(cache, withBuild(engine.wasm), (p) =>
+  const engineAsset = await cache.bytes(engine.wasm, (p) =>
     phase("downloading the engine…", 0.03 + p * 0.03),
   );
   // A compiled module, not a URL: the bytes may have come from IndexedDB.
@@ -493,9 +361,7 @@ async function boot() {
   await startEngineThreads(engine);
 
   phase("downloading resources…", 0.08);
-  const engineWasmUrl = withBuild(engine.wasm).href;
-  const packUrl = withBuild("./horizon-vfs.bin");
-  const pack = await fetchAsset(cache, packUrl, (p) =>
+  const pack = await cache.bytes("horizon-vfs.bin", (p) =>
     phase("downloading resources…", 0.08 + p * 0.55),
   );
   say(
@@ -503,7 +369,7 @@ async function boot() {
       (pack.cached ? " from the cache" : ""),
   );
   // Anything else this cache holds is a build this page cannot use.
-  if (cache) void pruneCache(cache, new Set([engineWasmUrl, packUrl.href]));
+  void cache.prune([engine.glue, engine.wasm, "horizon-vfs.bin"]);
 
   phase("mounting resources…", 0.66);
   const mounted = wasm.horizon_web_mount_pack(pack.bytes);

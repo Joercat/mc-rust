@@ -63,3 +63,7 @@ if [ "$bytes" -lt 50000000 ]; then
   exit 1
 fi
 echo "render_build: resource pack $((bytes / 1000000)) MB"
+
+# The page keys its stored copies on these hashes, and the pack's is only known
+# here: it was downloaded a moment ago.
+bash scripts/web_manifest.sh

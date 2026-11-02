@@ -41,8 +41,19 @@ services:
       - path: /threads.js
         name: Cache-Control
         value: no-cache
-      # The pack is fetched on every load and changes when it is repacked, so a
-      # stored copy must be revalidated rather than outliving its build.
+      # The build manifest is what tells the page whether its stored copies are
+      # still this build's; a cached copy of it would answer for the old one.
+      - path: /assets.json
+        name: Cache-Control
+        value: no-cache
+      - path: /asset-cache.js
+        name: Cache-Control
+        value: no-cache
+      - path: /web-manifest
+        name: Cache-Control
+        value: no-cache
+      # The pack is fetched once per browser, not once per load: the page keeps
+      # it in IndexedDB under the hash in assets.json.
       - path: /horizon-vfs.bin
         name: Cache-Control
         value: no-cache
