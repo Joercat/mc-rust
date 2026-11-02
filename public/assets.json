@@ -1,14 +1,14 @@
 {
-  "build": "2026-11-01.16",
+  "build": "2026-11-01.17",
   "files": {
     "index.html": "c1f7d5af78285f5bb744ca0ff39174fd00cb533011a63c42245b7f5808a3fc25",
-    "app.js": "5ad3ed9d2d9e9828ad808bda3aeea77ed8b30f3d98703a1e91c1d701ce5fb6fd",
+    "app.js": "20d8db0a5f9d59738f8b070a7bd9a6cf48b71f392b3d419dc9ef27cf2d677dfb",
     "threads.js": "d5c603777f2e88567774c172e6be66a7c21b21617d9c4880a3949c2281de7693",
     "thread-worker.js": "863fe35f3ba85508fe5d962a5c25a896574150fb13c33b49321b43b8b0a8842b",
     "asset-cache.js": "462a23d41f77f24214b4774eef5478a72bc6fbb17d4143b5a042ae7b5bffc281",
-    "horizon-client.js": "5cd22761c109d398b9b8051eb5483faf47c523de4b413d2a3b376590ece26c2f",
-    "horizon-client_bg.wasm": "a61074fc38f592572a6b21f5234909fc9a13db357b6e699049eb79b8bd1a88aa",
-    "horizon-client-threaded.js": "0fb689760541d88b161e169228cef81cea11d56c3c9eef277c33b4c43bb6fb52",
-    "horizon-client-threaded_bg.wasm": "4891f43830d48fac8ec4c106c9cb4034ba8977c251ff58cdbb2cc6c943a83980"
+    "horizon-client.js": "6b5fadae6f185d3949a10170b4a25370c74bab2f10fb3c997c07ac7d7f3dee21",
+    "horizon-client_bg.wasm": "13420b03222c97c641619647b7bfe46ac16a7da5f29a200ad58c82baad6dd6f6",
+    "horizon-client-threaded.js": "fbf956a4c6e9fefdd5d760d2b875d46e5f62fe1924bdf3ff16e9a002685b4217",
+    "horizon-client-threaded_bg.wasm": "c4137baabec331f369b9a63a57631e91ec33cb29ac08e1ac638be916f6b2abf5"
   }
 }

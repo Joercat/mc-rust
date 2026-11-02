@@ -98,6 +98,28 @@ The pieces, in build order:
    re-encoded tree elsewhere (`--jobs` sets the encoders), if a pack is built
    some other way.
 
+   The textures are most of what is left after the sounds. `--texture-mode
+   lossless` re-packs every PNG with oxipng (`-o2 --strip safe`): the pixels
+   are identical, and each atlas shrinks by whatever its original encoder left
+   behind. `--texture-mode quantize` also reduces each image to a palette
+   (pngquant at `--texture-quality 90` when it is installed, Pillow's octree
+   otherwise), which is where soft, shaded art loses a little banding in trade
+   for a much smaller atlas. A texture that did not get smaller is kept as it
+   was, so nothing is degraded twice:
+
+   ```sh
+   python3 scripts/pack_vfs.py PATH/TO/.local/horizon-client/26.3 \
+     PATH/TO/.horizon-cache public/horizon-vfs.bin \
+     --audio-bitrate 64k --texture-mode lossless
+   ```
+
+   Neither pass edits the prepared install: `scripts/overlay_tree.py` links
+   every file into the scratch tree the pack is built from, and a re-encoded
+   file is written beside its target and renamed over it, which breaks the
+   link instead of rewriting the install through it.
+   `scripts/compress_textures.py` runs the texture pass on its own, like
+   `scripts/compress_audio.py` does for the sounds.
+
 The page checks for the engine it picked (`public/horizon-client.js` and
 `public/horizon-client_bg.wasm`, or the threaded pair) and
 `public/horizon-vfs.bin` before it starts and, when they are absent (they are

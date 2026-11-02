@@ -106,6 +106,18 @@ impl Game<'_> {
         if (position - camera).length_squared() >= range * range {
             return false;
         }
+        self.box_in_view(camera, lo, hi)
+    }
+
+    /// `Frustum.isVisible` for a world-space box, with no distance limit: what
+    /// a renderer asks before it builds any geometry for an entity, so an
+    /// entity behind the camera costs nothing at all.
+    pub(super) fn box_in_view(
+        &self,
+        camera: glam::DVec3,
+        lo: glam::DVec3,
+        hi: glam::DVec3,
+    ) -> bool {
         self.view_frustum.as_ref().is_none_or(|view| {
             view.intersects(
                 (lo - camera - glam::DVec3::splat(0.5)).as_vec3(),

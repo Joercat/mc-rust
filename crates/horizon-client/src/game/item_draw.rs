@@ -424,6 +424,17 @@ impl Game<'_> {
             if pos.length_squared() > 64.0 * 64.0 {
                 continue;
             }
+            // An item the view cannot see is not resolved at all: its model,
+            // its baked layers and its quads are the frame's work, not the
+            // item's data, so skipping them changes nothing it draws.
+            let at = glam::DVec3::from_array(at);
+            if !self.box_in_view(
+                camera,
+                at - glam::DVec3::new(0.5, 0.5, 0.5),
+                at + glam::DVec3::new(0.5, 1.0, 0.5),
+            ) {
+                continue;
+            }
             // `extractItemGroupRenderState`: GROUND, seeded by the entity id.
             let owner = owner_at([q.x, q.y, q.z], 0.0, "minecraft:item");
             let state = self.resolve_item(

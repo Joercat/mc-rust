@@ -147,25 +147,35 @@ pub(crate) fn fire_contact(
     registry: &horizon_world::registry::BlockRegistry,
     bounds: Aabb,
 ) -> f32 {
+    fire_and_cactus_contact(world, registry, bounds).0
+}
+/// [`fire_contact`] and [`cactus_contact`] in one pass over the box: a dropped
+/// item asks both questions every tick, and each block of its box used to be
+/// read and resolved twice for the answer.
+pub(crate) fn fire_and_cactus_contact(
+    world: &World,
+    registry: &horizon_world::registry::BlockRegistry,
+    bounds: Aabb,
+) -> (f32, bool) {
     let b = bounds.deflate(Vec3::new(1e-5, 1e-5, 1e-5));
     let mut damage = 0.0f32;
+    let mut cactus = false;
     for x in b.min_position().x.floor() as i32..=b.max_position().x.floor() as i32 {
         for y in b.min_position().y.floor() as i32..=b.max_position().y.floor() as i32 {
             for z in b.min_position().z.floor() as i32..=b.max_position().z.floor() as i32 {
-                damage = damage.max(
-                    match registry
-                        .state(world.block(x, y, z))
-                        .map(|s| s.name.as_str())
-                    {
-                        Some("minecraft:fire") => 1.0,
-                        Some("minecraft:soul_fire") => 2.0,
-                        _ => 0.0,
-                    },
-                );
+                match registry
+                    .state(world.block(x, y, z))
+                    .map(|s| s.name.as_str())
+                {
+                    Some("minecraft:fire") => damage = damage.max(1.0),
+                    Some("minecraft:soul_fire") => damage = damage.max(2.0),
+                    Some("minecraft:cactus") => cactus = true,
+                    _ => {}
+                }
             }
         }
     }
-    damage
+    (damage, cactus)
 }
 /// `CactusBlock.entityInside`: the box (deflated by `1.0E-5`, as in
 /// `Entity.checkInsideBlocks`) touches a cactus; its inside shape is the
@@ -175,20 +185,7 @@ pub(crate) fn cactus_contact(
     registry: &horizon_world::registry::BlockRegistry,
     bounds: Aabb,
 ) -> bool {
-    let b = bounds.deflate(Vec3::new(1e-5, 1e-5, 1e-5));
-    for x in b.min_position().x.floor() as i32..=b.max_position().x.floor() as i32 {
-        for y in b.min_position().y.floor() as i32..=b.max_position().y.floor() as i32 {
-            for z in b.min_position().z.floor() as i32..=b.max_position().z.floor() as i32 {
-                if registry
-                    .state(world.block(x, y, z))
-                    .is_some_and(|s| s.name == "minecraft:cactus")
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    fire_and_cactus_contact(world, registry, bounds).1
 }
 impl LivingFluidWorld for MotionWorld<'_, '_, '_> {
     fn in_water(&mut self) -> Result<bool> {

@@ -30,6 +30,8 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
+from overlay_tree import link_tree, replace_with
+
 KIB = 1024
 MIB = 1024 * KIB
 
@@ -122,37 +124,52 @@ def main():
         print("compress_audio.py: no .ogg files found", file=sys.stderr)
         return 1
     os.makedirs(args.out, exist_ok=True)
+    # pack_vfs.py packs OUT_DIR in place of the prepared install, so everything
+    # that is not a sound has to be there too: it is linked, not copied.
+    linked = link_tree(args.resources, args.out)
+    if linked:
+        print(f"compress_audio.py: linked {linked} other files into {args.out}")
 
     before = sum(os.path.getsize(src) for src, _ in sounds)
     state = {"copied": 0, "encoded": 0, "skipped": 0, "failed": 0}
 
     def one(pair):
         src, dst = pair
-        if args.skip_existing and os.path.isfile(dst):
+        # With the tree linked in from the prepared install, `dst` exists
+        # before this runs: a resumed pass keeps only the files it rewrote.
+        if args.skip_existing and os.path.isfile(dst) and not os.path.samefile(src, dst):
             state["skipped"] += 1
             return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        # Written beside the target and renamed over it: writing in place
+        # would re-encode the prepared install through the link.
+        tmp = dst + ".tmp.ogg"
         try:
             duration, source_rate, _ = probe(ffprobe, src)
             target = long_bitrate if duration > args.long_after else bitrate
             # Already at or under the target: copying keeps it from losing a
             # second generation to re-encoding.
             if (source_rate and source_rate <= target * 1.05) or duration <= 0.0:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
+                shutil.copy2(src, tmp)
+                replace_with(tmp, dst)
                 state["copied"] += 1
                 return
-            encode(ffmpeg, src, dst, target)
-            if os.path.getsize(dst) >= os.path.getsize(src):
-                shutil.copy2(src, dst)
+            encode(ffmpeg, src, tmp, target)
+            if os.path.getsize(tmp) >= os.path.getsize(src):
+                shutil.copy2(src, tmp)
+                replace_with(tmp, dst)
                 state["copied"] += 1
             else:
+                replace_with(tmp, dst)
                 state["encoded"] += 1
         except (subprocess.CalledProcessError, ValueError, OSError) as error:
             state["failed"] += 1
             print(f"compress_audio.py: {src}: {error}", file=sys.stderr)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
-                shutil.copy2(src, dst)
+                if os.path.exists(tmp):
+                    replace_with(tmp, dst)
+                elif not os.path.exists(dst):
+                    shutil.copy2(src, dst)
             except OSError:
                 pass
 

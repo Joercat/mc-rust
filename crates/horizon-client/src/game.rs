@@ -4101,10 +4101,15 @@ impl Game<'_> {
             &mut f.fall_distance,
             |p| {
                 use horizon_client::falling_block::Inside;
-                if &*facts.get(world.block(p.x, p.y, p.z)).name == "minecraft:cobweb" {
+                // One block lookup answers both questions: the cobweb test and
+                // the bubble-column test used to read and resolve it twice.
+                let block = facts.get(world.block(p.x, p.y, p.z));
+                if &*block.name == "minecraft:cobweb" {
                     Inside::Cobweb
-                } else if let Some(column) =
-                    horizon_client::motion::bubble_column_at(world, registry, facts, collision, p)
+                } else if &*block.name == "minecraft:bubble_column"
+                    && let Some(column) = horizon_client::motion::bubble_column_at(
+                        world, registry, facts, collision, p,
+                    )
                 {
                     Inside::BubbleColumn(column)
                 } else {
@@ -8458,16 +8463,26 @@ impl Game<'_> {
                 horizon_client::shadows::mob_casters(&self.mobs, a).collect();
             let fixed = |id: &'static str| (id, horizon_client::shadows::shadow_params(id).0);
             let (item, item_radius) = fixed("minecraft:item");
+            // The shadow of something the view cannot see is a quad nobody draws.
+            let in_view = |p: glam::DVec3, radius: f32| {
+                self.box_in_view(
+                    camera,
+                    p - glam::DVec3::splat(f64::from(radius)),
+                    p + glam::DVec3::splat(f64::from(radius)),
+                )
+            };
             casters.extend(
                 self.dropped
                     .iter()
-                    .map(|i| (lerp(i.previous, i.position), item, item_radius)),
+                    .map(|i| (lerp(i.previous, i.position), item, item_radius))
+                    .filter(|(p, _, r)| in_view(*p, *r)),
             );
             let (orb, orb_radius) = fixed("minecraft:experience_orb");
             casters.extend(
                 self.orbs
                     .iter()
-                    .map(|o| (lerp(o.previous, o.position), orb, orb_radius)),
+                    .map(|o| (lerp(o.previous, o.position), orb, orb_radius))
+                    .filter(|(p, _, r)| in_view(*p, *r)),
             );
             for (pos, id, radius) in casters {
                 let strength = horizon_client::shadows::shadow_params(id).1;
@@ -8631,14 +8646,24 @@ impl Game<'_> {
         // Falling blocks use their baked model, including non-cubic shapes.
         self.mark_entity(out.len(), "minecraft:falling_block");
         for f in &self.falling {
+            let at = glam::DVec3::new(
+                f.previous.x + (f.position.x - f.previous.x) * alpha,
+                f.previous.y + (f.position.y - f.previous.y) * alpha,
+                f.previous.z + (f.position.z - f.previous.z) * alpha,
+            );
+            // A block falling out of the view is skipped before its baked
+            // model is collected: it draws nothing this frame either way.
+            if !self.box_in_view(
+                camera,
+                at - glam::DVec3::new(0.5, 0.0, 0.5),
+                at + glam::DVec3::new(0.5, 1.0, 0.5),
+            ) {
+                continue;
+            }
             let Some((_, tint)) = self.block_face_sprite(f.state) else {
                 continue;
             };
-            let p = glam::DVec3::new(
-                f.previous.x + (f.position.x - f.previous.x) * alpha - 0.5,
-                f.previous.y + (f.position.y - f.previous.y) * alpha,
-                f.previous.z + (f.position.z - f.previous.z) * alpha - 0.5,
-            ) - camera;
+            let p = glam::DVec3::new(at.x - 0.5, at.y, at.z - 0.5) - camera;
             let o = p.as_vec3();
             let light = self.world.light(
                 f.position.x.floor() as i32,

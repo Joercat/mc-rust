@@ -90,7 +90,9 @@ impl ItemEntity {
                 lava_hurt = true;
             }
         }
-        let fire_damage = crate::motion::environment::fire_contact(world, registry, self.bounds());
+        // Fire and cactus in one scan of the item's box (`Entity.checkInsideBlocks`).
+        let (fire_damage, on_cactus) =
+            crate::motion::environment::fire_and_cactus_contact(world, registry, self.bounds());
         if fire_damage > 0.0 && !fire_immune {
             self.fire_ticks = self.fire_ticks.max(160);
             if !items.resists_fire(&self.stack, "minecraft:in_fire") {
@@ -101,9 +103,7 @@ impl ItemEntity {
         // hurt cooldown, so it loses 1 health every tick it touches a cactus
         // (5 health: gone in 5 ticks). Fire resistance does not help;
         // `ItemStack.canBeHurtBy` only skips it for a damage_resistant stack.
-        if crate::motion::environment::cactus_contact(world, registry, self.bounds())
-            && !items.resists_cactus(&self.stack)
-        {
+        if on_cactus && !items.resists_cactus(&self.stack) {
             self.health -= 1;
         }
         ItemEnvironmentTick {

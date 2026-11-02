@@ -47,6 +47,8 @@ def main():
     args = sys.argv[1:]
     audio_bitrate = None
     audio_long_bitrate = None
+    texture_mode = None
+    texture_quality = None
     positional = []
     i = 0
     while i < len(args):
@@ -56,14 +58,23 @@ def main():
         elif args[i] == "--audio-long-bitrate" and i + 1 < len(args):
             i += 1
             audio_long_bitrate = args[i]
+        elif args[i] == "--texture-mode" and i + 1 < len(args):
+            i += 1
+            texture_mode = args[i]
+        elif args[i] == "--texture-quality" and i + 1 < len(args):
+            i += 1
+            texture_quality = args[i]
         else:
             positional.append(args[i])
         i += 1
     if len(positional) != 3:
         fail(
             "usage: pack_vfs.py RESOURCES_DIR CACHE_DIR OUT_PATH "
-            "[--audio-bitrate 64k] [--audio-long-bitrate 96k]"
+            "[--audio-bitrate 64k] [--audio-long-bitrate 96k] "
+            "[--texture-mode lossless|quantize] [--texture-quality 90]"
         )
+    if texture_mode not in (None, "none", "lossless", "quantize"):
+        fail(f"--texture-mode must be lossless or quantize, not {texture_mode!r}")
     res_dir, cache_dir, out_path = positional
 
     # An empty pack "succeeds" and then the page cannot load anything, which is
@@ -106,6 +117,26 @@ def main():
         print("pack_vfs.py: " + " ".join(cmd), file=sys.stderr)
         subprocess.run(cmd, check=True)
         res_dir = audio_scratch
+
+    # Textures are most of what is left after the sounds. Lossless re-packing
+    # (oxipng) keeps every pixel; `quantize` trades a little banding for a much
+    # smaller atlas. Both run on the tree the audio pass left, if it ran.
+    texture_scratch = None
+    if texture_mode and texture_mode != "none":
+        texture_scratch = tempfile.mkdtemp(prefix="horizon-textures-")
+        cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "compress_textures.py"),
+            res_dir,
+            texture_scratch,
+            "--mode",
+            texture_mode,
+        ]
+        if texture_quality:
+            cmd += ["--quality", texture_quality]
+        print("pack_vfs.py: " + " ".join(cmd), file=sys.stderr)
+        subprocess.run(cmd, check=True)
+        res_dir = texture_scratch
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -159,6 +190,8 @@ def main():
 
     if audio_scratch:
         shutil.rmtree(audio_scratch, ignore_errors=True)
+    if texture_scratch:
+        shutil.rmtree(texture_scratch, ignore_errors=True)
 
     total_out = os.path.getsize(out_path)
     print(
