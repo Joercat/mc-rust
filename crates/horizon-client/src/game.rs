@@ -16568,11 +16568,12 @@ pub async fn run_web(
         dedicated: None,
         benchmark: None,
         dev_mods: Vec::new(),
-        // Single player runs its integrated server in a page worker when the
-        // browser gave the page shared memory (the threaded engine): a world
-        // tick then never holds up a frame. Without workers the world runs in
-        // the frame, as it always has.
-        server_thread: cfg!(all(target_arch = "wasm32", target_feature = "atomics")),
+        // Single player keeps its world in the frame. Running the integrated
+        // server in a page worker needs a slot for the server, the connection
+        // and the client's reader at once, and a page that starts few workers
+        // leaves the join waiting forever on a connection nobody reads. The
+        // tick's cost is bounded where the work happens instead.
+        server_thread: false,
         execution_role: execution_role::ExecutionRole::Client,
     };
     // The web build has no env var to opt into diagnostics: always record the
