@@ -5388,6 +5388,9 @@ impl Game<'_> {
             self.begin_autosave()?;
         }
         self.poll_autosave()?;
+        // Unloaded chunks and a paused save queue writes too: the frame moves a
+        // millisecond of them so the queue cannot grow into a stall.
+        let _ = self.save.write_some(Duration::from_millis(1));
         if running {
             self.advance_clock();
         }

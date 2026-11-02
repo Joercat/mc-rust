@@ -1814,10 +1814,15 @@ fn compress_records(
     if helpers <= 1 {
         return records.iter().map(|(_, r)| compress(r)).collect();
     }
+    // The page's main thread cannot park, so it never spawns a helper and
+    // never joins one: the inline pass above is the whole save there.
+    if !horizon_core::sync::may_block() {
+        return records.iter().map(|(_, record)| compress(record)).collect();
+    }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut done: Vec<(usize, std::io::Result<Option<ChunkRecord>>)> =
         std::thread::scope(|scope| {
-            let threads: Vec<_> = (0..if horizon_core::sync::may_block() { helpers } else { 0 })
+            let threads: Vec<_> = (0..helpers)
                 .map(|_| {
                     scope.spawn(|| {
                         let mut out = Vec::new();
@@ -1831,6 +1836,7 @@ fn compress_records(
                     })
                 })
                 .collect();
+            horizon_core::sync::guard_blocking("compress_records joins its helpers");
             threads
                 .into_iter()
                 .flat_map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
@@ -2037,6 +2043,12 @@ pub struct SaveDir {
     sequence: AtomicU64,
     writer: Mutex<Option<Writer>>,
     outstanding: Arc<Outstanding>,
+    /// The wasm build's write queue. The page's main thread only ever enqueues
+    /// here; `write_some` moves a couple of milliseconds of it per frame, so a
+    /// save never encodes or writes a region file inside one frame (and never
+    /// waits for a worker that is not there).
+    #[cfg(target_arch = "wasm32")]
+    queued: Mutex<std::collections::VecDeque<WriteBatch>>,
     /// Set by `Persistent` before the first load.
     pub tables: OnceLock<Arc<SaveTables>>,
     /// The dimension's skylight and height, from its folder name.
@@ -2080,6 +2092,8 @@ impl SaveDir {
             sequence: AtomicU64::new(0),
             writer: Mutex::new(None),
             outstanding: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            queued: Default::default(),
             tables: OnceLock::new(),
             shape,
             lod_regions: Default::default(),
@@ -2255,16 +2269,9 @@ impl SaveDir {
             *horizon_core::sync::lock(&self.outstanding.count) += 1;
             #[cfg(target_arch = "wasm32")]
             {
-                write_batch(
-                    &self.root,
-                    &self.regions,
-                    &self.entity_regions,
-                    &self.poi_regions,
-                    &self.pending,
-                    &self.outstanding,
-                    folder,
-                    &(folder, batch),
-                );
+                // Not here: a frame is not where a region file is written.
+                // `write_some` takes this a few milliseconds at a time.
+                horizon_core::sync::lock(&self.queued).push_back((folder, batch));
             }
             #[cfg(not(target_arch = "wasm32"))]
             let mut writer = horizon_core::sync::lock(&self.writer);
@@ -2333,7 +2340,9 @@ impl SaveDir {
         if !horizon_core::sync::may_block() {
             let deadline =
                 horizon_core::time::Instant::now() + std::time::Duration::from_secs(30);
-            while !self.writes_finished()? {
+            // The writes this waits for are this thread's own: it drains the
+            // queue in short batches, so the wait is bounded work, not a park.
+            while !self.write_some(std::time::Duration::from_millis(2))? {
                 if horizon_core::time::Instant::now() > deadline {
                     return Err("the region writer did not finish the save".into());
                 }
@@ -2341,6 +2350,7 @@ impl SaveDir {
             }
             return self.write_result();
         }
+        horizon_core::sync::guard_blocking("RegionFile flush waits for the writer");
         let mut count = horizon_core::sync::lock(&self.outstanding.count);
         while *count > 0 {
             count = self
@@ -2352,9 +2362,50 @@ impl SaveDir {
         drop(count);
         self.write_result()
     }
+    /// Writes queued work for at most `budget` and says whether nothing is
+    /// left. On the desktop the writer thread owns the queue, so this only
+    /// polls; in a page there is no writer thread to hand it to, and the frame
+    /// is where the bytes go — a budget at a time, never as one long write.
+    pub fn write_some(&self, budget: std::time::Duration) -> Result<bool> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = budget;
+            return self.writes_finished();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let started = horizon_core::time::Instant::now();
+            loop {
+                let next = horizon_core::sync::lock(&self.queued).pop_front();
+                let Some((folder, batch)) = next else {
+                    break;
+                };
+                write_batch(
+                    &self.root,
+                    &self.regions,
+                    &self.entity_regions,
+                    &self.poi_regions,
+                    &self.pending,
+                    &self.outstanding,
+                    folder,
+                    &(folder, batch),
+                );
+                if started.elapsed() >= budget {
+                    break;
+                }
+            }
+            self.write_result()?;
+            self.writes_finished()
+        }
+    }
     /// Poll durability without holding up the event loop. Errors remain visible
     /// to every waiter, including a later synchronous shutdown.
     pub fn writes_finished(&self) -> Result<bool> {
+        #[cfg(target_arch = "wasm32")]
+        if !horizon_core::sync::lock(&self.queued).is_empty() {
+            self.write_result()?;
+            return Ok(false);
+        }
         let count = horizon_core::sync::lock(&self.outstanding.count);
         let finished = *count == 0;
         drop(count);

@@ -244,6 +244,10 @@ files at all, the page stops with the same message the desktop client gives.
   chunks, then every resident chunk's entities, then the metadata), so the
   thirty-second save no longer encodes the whole world inside one frame. The
   pause save takes the same path on the server thread, a little per tick.
+  Its writes are queued, not performed in the frame that queued them: the
+  frame adds a batch to the save queue and `write_some` drains a millisecond of
+  it per frame, so no autosave, pause save or closing save encodes a region
+  file inside one frame.
 - `public/app.js` measures the device (`hardwareConcurrency`, `deviceMemory`)
   and puts `?quality=low` on a page with four threads and a few gigabytes. The
   engine applies the Performance preset on a first run, saves it once, and caps

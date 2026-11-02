@@ -64,6 +64,21 @@ pub fn set_may_block(may: bool) {
     imp::set_may_block(may);
 }
 
+/// Fails loudly when a thread that may not park reaches a parking wait.
+///
+/// The page's main thread has no way back from `memory.atomic.wait32`: the
+/// whole page dies with `Atomics.wait cannot be called in this context`. A
+/// direct `Condvar::wait`, `mpsc::recv` or `JoinHandle::join` on that thread is
+/// therefore a crash, not a slow frame. Code that has such a wait puts this in
+/// front of it, so a harness running the same path with `set_may_block(false)`
+/// fails at the call that would have trapped instead of hanging.
+pub fn guard_blocking(what: &str) {
+    if may_block() {
+        return;
+    }
+    panic!("a thread that may not park reached a parking wait: {what}");
+}
+
 /// A mutex, or an `Arc` around one: what [`lock`] accepts.
 pub trait MutexLike {
     type Item: ?Sized;

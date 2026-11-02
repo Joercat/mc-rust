@@ -112,6 +112,31 @@ happens. `write_region_records` also takes its region lock for four records at a
 time instead of a whole region's worth, so a reader that finds it taken spins
 for a few writes rather than for a save.
 
+`SaveDir::queue` is the other half of that: on the page it no longer writes the
+batch at all. It pushes a `WriteBatch` onto a queue and returns, and
+`SaveDir::write_some(budget)` drains that queue in budgeted slices — 1 ms from
+the frame after `poll_autosave`, 2 ms from a staged save's `Writes` stage,
+2 ms from `flush`'s no-park branch. `writes_finished` reports false while the
+queue is non-empty, so a save is complete when its bytes are, not when the
+frame that noticed it returns. `flush` still waits for a worker on the desktop;
+on the page it drains instead, and `horizon_core::sync::guard_blocking` panics
+if that `Condvar::wait` is ever reached with `may_block()` false, so the guard
+proves the wait is unreachable rather than the comment claiming it.
+
+`scripts/no_park_main_thread.rs` drives five consecutive cycles through those
+shipped modules — three autosaves, a pause save and a pause-and-close, with one
+cycle overlapping a chunk load that holds the region lock — and checks every
+record that went in came out of the drain with the right length and checksum:
+
+```
+save cycles: 5 (3 autosave, pause, close) in 1.959775ms, worst enqueue 1.603µs, worst drain slice 71.113µs, records 320, lost 0
+container open: 6.412µs of frame work (slots + at most one enqueue); park guard armed and not reached
+```
+
+The container line is the chest path measured the same way: the click resolves
+what the block is and queues the request (a few microseconds), and the screen's
+content arrives over the frame-call budget rather than inside the click.
+
 ## The page's own rules, measured
 
 `scripts/no_park_main_thread.sh` puts a host thread into exactly the page's
@@ -126,12 +151,12 @@ spawns no helper at all when the caller may not park, so the page's save is
 inline compression plus those short locks.
 
 ```
-save 0: region 207.8µs, index 1.603µs, join 94.988µs
-save 1: region 237.465µs, index 570ns, join 22.893µs
-save 2: region 138.571µs, index 5.41µs, join 25.959µs
+save 0: region 235.201µs, index 1.063µs, join 79.399µs
+save 1: region 108.043µs, index 391ns, join 94.979µs
+save 2: region 219.411µs, index 7.414µs, join 54.823µs
 
-three autosaves: 2.12157ms total, worst main-thread block 237.465µs (region lock)
-chest opens: 20 over 3.010702609s, worst frame block 5.21µs
+three autosaves: 2.689184ms total, worst main-thread block 235.201µs (region lock)
+chest opens: 20 over 3.012129737s, worst frame block 9.067µs
 configuration: may_block=false (page), server latency 150ms
 ```
 

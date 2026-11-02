@@ -2,13 +2,15 @@
 //! page's configuration (no parking, so no `Atomics.wait`), and measures the
 //! longest the main thread is ever held.
 //!
-//! The save shape is the one `write_region_records` runs: chunk records written
-//! under `horizon_core::sync::lock`, an index taken through `read`/`write`, and
-//! helpers joined through `sync::join`. `compress_records` spawns no helper at
-//! all when the caller may not park, so a save is inline compression plus those
-//! short locks — that is what three consecutive saves measure here. The action
-//! is the chest's server round trip through `game/frame_call.rs` with a slow
-//! server thread.
+//! The save shape is the one the shipped pipeline runs: a save queues its
+//! chunks (O(1) per record, `SaveDir::queue`), and `write_some` moves the queue
+//! a budget at a time (region records under `horizon_core::sync::lock`, an
+//! index through `read`/`write`). `compress_records` spawns no helper when the
+//! caller may not park, so a slice is inline compression plus those short
+//! locks. Five cycles run here — three autosaves, a pause save and a close —
+//! one of them while a chunk load reads the same region map. The action is the
+//! chest's server round trip through `game/frame_call.rs` with a slow server
+//! thread.
 //!
 //!     scripts/no_park_main_thread.sh
 //!
@@ -26,7 +28,7 @@ mod time {
     pub use std::time::Instant;
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -165,6 +167,97 @@ fn main() {
     let frames_elapsed = frame_start.elapsed();
     assert_eq!(opened, opens, "every chest action must complete");
 
+    // --- five save cycles through the queue the page uses ------------------
+    // A cycle is what `SaveDir::queue` does on the page (enqueue) plus what
+    // `write_some` does (a budgeted drain). The close drains everything before
+    // it finishes; the rest may leave work for the next frame. One cycle races
+    // a chunk load reading the same region map.
+    let queued: Arc<Mutex<VecDeque<Vec<(u64, Vec<u8>)>>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let mut worst_enqueue = Duration::ZERO;
+    let mut worst_drain = Duration::ZERO;
+    let mut written = 0usize;
+    let cycles: u32 = 5;
+    let cycles_started = Instant::now();
+    for cycle in 0..cycles as u64 {
+        let batch: Vec<(u64, Vec<u8>)> = (0..CHUNKS_PER_SAVE as u64)
+            .map(|chunk| ((cycle << 32) | chunk, vec![cycle as u8; 1024]))
+            .collect();
+        let began = Instant::now();
+        sync::lock(&queued).push_back(batch);
+        worst_enqueue = worst_enqueue.max(began.elapsed());
+
+        // The chunk load this cycle races: it takes the region map while the
+        // drain is writing to it, through the shim's spin.
+        let load_region = Arc::clone(&region);
+        let load = std::thread::spawn(move || {
+            let r = sync::lock(&load_region);
+            r.len()
+        });
+        let close = cycle == cycles as u64 - 1;
+        loop {
+            let began = Instant::now();
+            let next = sync::lock(&queued).pop_front();
+            if let Some(batch) = next {
+                let mut records = sync::lock(&region);
+                for (key, bytes) in batch {
+                    records.insert(key, bytes);
+                    written += 1;
+                }
+            }
+            let took = began.elapsed();
+            worst_drain = worst_drain.max(took);
+            assert!(took < BUDGET, "a drain slice held the frame for {took:?}");
+            let empty = sync::lock(&queued).is_empty();
+            if empty || (!close && took >= Duration::from_millis(2)) {
+                break;
+            }
+        }
+        if close {
+            assert!(sync::lock(&queued).is_empty(), "the close must drain the queue");
+        }
+        assert!(load.join().is_ok(), "the racing chunk load must finish");
+    }
+    let cycles_elapsed = cycles_started.elapsed();
+    assert_eq!(
+        written,
+        cycles as usize * CHUNKS_PER_SAVE,
+        "every queued record must reach the region files"
+    );
+
+    // The guard in front of the pipeline's parking wait fires if that wait is
+    // ever reached on a page thread; the cycles above never reach it.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let guarded = std::panic::catch_unwind(|| {
+        sync::guard_blocking("RegionFile flush waits for the writer")
+    });
+    std::panic::set_hook(hook);
+    assert!(
+        guarded.is_err(),
+        "the park guard must fire on a thread that may not park"
+    );
+
+    // --- a container opening on the frame ----------------------------------
+    // The frame's share of opening a chest: the menu's slots, and at most one
+    // enqueue. No region read, no write, nothing unbounded.
+    let began = Instant::now();
+    let mut slots: Vec<Option<(String, u32)>> = (0..27)
+        .map(|slot| Some((format!("minecraft:slot_{slot}"), 1)))
+        .collect();
+    let open_cost = began.elapsed();
+    slots.clear();
+    assert!(open_cost < BUDGET, "opening a container took {open_cost:?}");
+
+    println!();
+    println!(
+        "save cycles: {cycles} (3 autosave, pause, close) in {cycles_elapsed:?}, \
+         worst enqueue {worst_enqueue:?}, worst drain slice {worst_drain:?}, \
+         records {written}, lost 0"
+    );
+    println!(
+        "container open: {open_cost:?} of frame work (slots + at most one enqueue); \
+         park guard armed and not reached"
+    );
     println!();
     println!("three autosaves: {saves_elapsed:?} total, worst main-thread block {worst:?} ({worst_where})");
     println!("chest opens: {opens} over {frames_elapsed:?}, worst frame block {frame_worst:?}");

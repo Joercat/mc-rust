@@ -197,7 +197,7 @@ impl Game<'_> {
                     save.stage = AutosaveStage::Writes;
                 }
                 AutosaveStage::Writes => {
-                    finished = self.save.writes_finished()?;
+                    finished = self.save.write_some(SNAPSHOT_BUDGET)?;
                 }
             }
             Ok(())
@@ -290,7 +290,7 @@ impl Game<'_> {
                     }
                     Ok(false)
                 }
-                Stage::Writes => self.save.writes_finished(),
+                Stage::Writes => self.save.write_some(SNAPSHOT_BUDGET),
             }
         })();
         match result {

@@ -369,6 +369,96 @@ def rwlock_check(crates: list[str]) -> list[str]:
     return offenders
 
 
+SAVE_FILES = [
+    "horizon-client/src/save.rs",
+    "horizon-client/src/game/saving.rs",
+    "horizon-client/src/game/persist.rs",
+    "horizon-client/src/game/integrated.rs",
+]
+# What makes a parking site in the save pipeline safe: the shim's guard, a
+# `may_block()` branch, a poll, or a budgeted drain that never parks.
+SAVE_GUARDS = (
+    "guard_blocking",
+    "may_block",
+    "try_recv",
+    "try_send",
+    "is_finished",
+    "write_some",
+    "try_lock",
+    "try_write",
+    "try_read",
+)
+# Not a parking wait despite the name: a cache that records a key.
+SAVE_NOT_A_WAIT = ("tick_chunks.wait(",)
+SAVE_PATTERNS = [
+    ("condvar", re.compile(r"\.wait(?:_timeout)?\(")),
+    ("recv", re.compile(r"\.recv(?:_timeout)?\(")),
+    ("sync_channel", re.compile(r"\bsync_channel\(")),
+    ("park", re.compile(r"\bthread::(?:park|park_timeout)\(")),
+    ("join", re.compile(r"\.join\(\)")),
+]
+
+
+def save_pipeline_check() -> list[str]:
+    """The two invariants the save pipeline has to keep on a page.
+
+    1. `SaveDir::queue` only enqueues there: a frame is not where a region file
+       is written, so `write_batch(` may not appear in it.
+    2. Every parking site in the pipeline carries a guard (or is a poll), so a
+       `Condvar::wait`/`recv`/`join` cannot be reached on the page's thread.
+    """
+    problems = []
+    save = os.path.join(WORKSPACE, SAVE_FILES[0])
+    with open(save, encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+    enqueues = [
+        i for i, line in enumerate(lines) if "push_back((folder, batch))" in line
+    ]
+    if not enqueues:
+        problems.append(f"{SAVE_FILES[0]}: queue no longer enqueues the batch")
+    for at in enqueues:
+        # The enqueue and the write must not be neighbours: the page's queue
+        # call hands the batch to `write_some`, it does not write it.
+        for near in range(max(0, at - 12), min(len(lines), at + 3)):
+            if "write_batch(" in lines[near]:
+                problems.append(
+                    f"{SAVE_FILES[0]}:{near + 1}: queue writes a batch inline on the "
+                    f"calling thread; it must enqueue and let `write_some` drain"
+                )
+    for rel in SAVE_FILES:
+        path = os.path.join(WORKSPACE, rel)
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        tests = test_scopes(lines)
+        scopes = cfg_scopes(lines)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("//") or any(s <= i <= e for s, e in tests):
+                continue
+            # A site whose table verdict says the page never runs it is not the
+            # save pipeline's business here.
+            verdict = VERDICTS.get(f"{rel}::{enclosing_fn(lines, i)}") or FILE_VERDICTS.get(
+                rel
+            )
+            if verdict and verdict[0] in ("unreachable", "not-wasm", "worker", "not-a-wait"):
+                continue
+            if "not(target_arch = \"wasm32\")" in " ".join(
+                expr for s, e, expr in scopes if s <= i <= e
+            ):
+                continue
+            if not any(pattern.search(line) for _kind, pattern in SAVE_PATTERNS):
+                continue
+            if any(token in line for token in SAVE_NOT_A_WAIT):
+                continue
+            if "sync::join(" in line:
+                continue
+            window = " ".join(lines[max(0, i - 14) : i + 15])
+            if any(token in window for token in SAVE_GUARDS):
+                continue
+            problems.append(f"{rel}:{i + 1}: unguarded parking site: {stripped}")
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -378,6 +468,7 @@ def main() -> int:
     parser.add_argument("--from-cargo", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--rwlock", action="store_true", help="only the RwLock check")
+    parser.add_argument("--save", action="store_true", help="only the save-pipeline check")
     args = parser.parse_args()
 
     crates = wasm_crates(args.from_cargo)
@@ -386,6 +477,13 @@ def main() -> int:
         for crate in crates:
             print(crate)
         return 0
+
+    if args.save:
+        problems = save_pipeline_check()
+        print(f"save-pipeline problems: {len(problems)}")
+        for line in problems:
+            print("  " + line)
+        return 1 if problems else 0
 
     if args.rwlock:
         offenders = rwlock_check(crates)
@@ -427,6 +525,10 @@ def main() -> int:
         print(f"  {verdict:18s} {counts[verdict]}")
     offenders = rwlock_check(crates)
     print(f"RwLock taken without the shim: {len(offenders)}")
+    save_problems = save_pipeline_check()
+    print(f"save-pipeline problems: {len(save_problems)}")
+    for line in save_problems[:20]:
+        print("  " + line)
     for line in offenders[:20]:
         print("  " + line)
     if unclassified:
@@ -434,7 +536,7 @@ def main() -> int:
         for site in unclassified:
             print(f"  {site.rel}:{site.line} {site.kind} in {site.function}")
         return 1
-    return 1 if offenders else 0
+    return 1 if offenders or save_problems else 0
 
 
 if __name__ == "__main__":
