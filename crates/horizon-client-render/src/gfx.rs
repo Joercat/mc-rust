@@ -555,6 +555,8 @@ pub struct Renderer {
     block_entities: crate::fast_hash::FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
     /// Changes whenever `block_entities` does (unique across renderers).
     block_entity_revision: u64,
+    /// An upload has already explained that the terrain arena is full.
+    upload_full_logged: bool,
     /// VisGraph face connectivity per meshed section (cave culling).
     occlusion: occlusion::Occlusion,
     /// Resolution scale, FXAA and TAA (Horizon settings).
@@ -2816,6 +2818,7 @@ impl Renderer {
             shadow_runs: page_runs::PageRuns::default(),
             block_entities: Default::default(),
             block_entity_revision: next_block_entity_revision(),
+            upload_full_logged: false,
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             world_post,
             hdr: None,
@@ -3080,7 +3083,29 @@ impl Renderer {
     pub fn start_occlusion(&mut self, camera: DVec3, distance: f32) {
         self.occlusion.update(camera, (distance / 16.0) as i32 + 2);
     }
-    pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) {
+    /// Puts `mesh` in place of `key`'s section. `false` when the section could
+    /// not be placed (the vertex arena has no room); the old section is kept
+    /// as it was, and the caller keeps the mesh to try again on a later frame.
+    /// Releasing first would leave a hole nothing re-meshes: the section would
+    /// simply stop being drawn, which reads as blocks vanishing from a chunk.
+    pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) -> bool {
+        let empty = mesh.solid.is_empty() && mesh.translucent.is_empty();
+        let section = if empty {
+            None
+        } else {
+            match self.upload_mesh(mesh) {
+                Some(section) => Some(section),
+                None => {
+                    if !std::mem::replace(&mut self.upload_full_logged, true) {
+                        log::warn!(
+                            "Horizon: terrain memory is full; section uploads wait for room \
+                             instead of dropping what they replace"
+                        );
+                    }
+                    return false;
+                }
+            }
+        };
         self.occlusion.set(key, mesh.visibility);
         let changed = if mesh.block_entities.is_empty() {
             self.block_entities.remove(&key).is_some()
@@ -3095,14 +3120,11 @@ impl Renderer {
             self.lod_retiring.remove(&key);
         }
         self.release_section(key);
-        let section = self.upload_mesh(mesh);
-        self.set_detail(
-            key,
-            section.is_some() || (mesh.solid.is_empty() && mesh.translucent.is_empty()),
-        );
+        self.set_detail(key, section.is_some() || empty);
         if let Some(section) = section {
             self.sections.insert(key, section);
         }
+        true
     }
     fn upload_mesh(&mut self, mesh: &SectionMesh) -> Option<SectionGpu> {
         let solid = (mesh.solid.len() / 4) as u32;

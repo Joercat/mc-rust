@@ -13156,11 +13156,16 @@ impl Game<'_> {
             // The meshes, once copied, are freed by a worker (`Streaming::free`).
             if !budgeted && self.pending_uploads.is_empty() {
                 horizon_client::spans::time("upload", || {
-                    for (key, mesh) in &uploads {
-                        renderer.upload(*key, mesh);
+                    for (key, mesh) in uploads {
+                        if renderer.upload(key, &mesh) {
+                            self.streaming.free(vec![(key, mesh)]);
+                        } else {
+                            // No room yet: keep it for a later frame rather
+                            // than dropping a section the player can see.
+                            self.pending_uploads.push((key, mesh));
+                        }
                     }
                 });
-                self.streaming.free(uploads);
             } else {
                 // Horizon's chunk-update and upload budgets: the nearest
                 // sections go first, the rest wait for later frames; a newer
@@ -13209,7 +13214,12 @@ impl Game<'_> {
                         break;
                     }
                     let (key, mesh) = pending.pop().expect("checked above");
-                    renderer.upload(key, &mesh);
+                    if !renderer.upload(key, &mesh) {
+                        // Out of terrain memory this frame: leave it first in
+                        // line for the next one instead of losing the section.
+                        pending.push((key, mesh));
+                        break;
+                    }
                     spent.push((key, mesh));
                     count += 1;
                     bytes += size;
