@@ -26,6 +26,13 @@ const STORE = "assets";
 const OLD_DB_NAME = "horizon-web-cache";
 export const MANIFEST = "assets.json";
 
+/// The manifest names files the way the build publishes them (`app.js`), while
+/// the page addresses them relative to itself (`./app.js`). One spelling is
+/// used for every lookup, so the two can never miss each other.
+export function bareName(name) {
+  return String(name).replace(/^\.\//, "");
+}
+
 /// The lowercase hex SHA-256 of `bytes`, or null where SubtleCrypto is absent
 /// (an insecure context): the cache then stores by name, and a rebuild is a
 /// full download again rather than a wrong one.
@@ -227,7 +234,7 @@ export function createAssetCache({
     } catch {
       return null;
     }
-    return files != null && Object.prototype.hasOwnProperty.call(files, name);
+    return files != null && Object.prototype.hasOwnProperty.call(files, bareName(name));
   }
 
   /// The bytes of `name`, from IndexedDB when this browser already has that
@@ -239,7 +246,8 @@ export function createAssetCache({
     } catch (error) {
       warn(`[horizon] no build manifest for ${name}; downloading it by URL`, error);
     }
-    const hash = files && typeof files[name] === "string" ? files[name] : null;
+    const bare = bareName(name);
+    const hash = files && typeof files[bare] === "string" ? files[bare] : null;
     const key = hash ? `sha256:${hash}` : null;
     if (key && db && !nocache) {
       try {
@@ -267,7 +275,7 @@ export function createAssetCache({
     }
     if (db && !nocache) {
       const record = {
-        key: key || `raw:${name}`,
+        key: key || `raw:${bare}`,
         // A Blob is stored on disk rather than in the IndexedDB heap.
         bytes: new Blob([fetched]),
         size: fetched.length,
@@ -288,8 +296,9 @@ export function createAssetCache({
       const recorded = await manifest().catch(() => null);
       const keep = new Set(["manifest"]);
       for (const name of names) {
-        const hash = recorded && recorded.files ? recorded.files[name] : null;
-        keep.add(hash ? `sha256:${hash}` : `raw:${name}`);
+        const bare = bareName(name);
+        const hash = recorded && recorded.files ? recorded.files[bare] : null;
+        keep.add(hash ? `sha256:${hash}` : `raw:${bare}`);
       }
       const stored = await allKeys(db);
       await forget(db, stored.filter((key) => !keep.has(key)));

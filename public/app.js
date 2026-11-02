@@ -66,7 +66,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.14";
+const BUILD = "2026-11-01.15";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -87,8 +87,11 @@ const ENGINES = {
 /// request; a host with no manifest is asked with a HEAD, where only a definite
 /// "no such file" counts (a refused HEAD is not a missing build).
 async function present(cache, name) {
+  // Only a definite yes is taken from the manifest. A "no" is confirmed with
+  // the host before the page calls its own build missing: a manifest can lag a
+  // half-published deploy, and a stale one must not stop the page starting.
   const known = await cache.has(name).catch(() => null);
-  if (known !== null) return known;
+  if (known === true) return true;
   try {
     const response = await fetch(withBuild(name), { method: "HEAD" });
     return response.status !== 404 && response.status !== 410;

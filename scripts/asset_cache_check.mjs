@@ -211,7 +211,25 @@ await retried.open();
 await retried.bytes("horizon-client-threaded_bg.wasm");
 check("tampered asset is fetched again next load", retry.assets, 1);
 
-// 6. `?nocache=1` ignores what is stored and refreshes it.
+// 6. The page addresses its own files relative to itself (`./app.js`); the
+//    manifest names them as published (`app.js`). Both must reach one record,
+//    or the page decides its own build is missing and never boots.
+const PREFIXED = ASSETS.map((name) => `./${name}`);
+const relative = emptyCounter();
+const e = await load(host, idb, relative, { names: PREFIXED });
+check("relative paths fetches", relative.total, 0);
+check("has() accepts a relative path", await e.cache.has("./horizon-client-threaded.js"), true);
+for (const name of PREFIXED) {
+  check(`relative path ${name} cached flag`, e.got.get(name).cached, true);
+  check(`relative path ${name} bytes`, sha(e.got.get(name).bytes), sha(host.files.get(name.slice(2))));
+}
+// ...and pruning them keeps them: the page prunes with these same names.
+const afterPrune = emptyCounter();
+const f = await load(host, idb, afterPrune, { names: PREFIXED });
+check("relative paths survive prune", afterPrune.total, 0);
+check("relative paths cached after prune", f.got.get(PREFIXED[0]).cached, true);
+
+// 7. `?nocache=1` ignores what is stored and refreshes it.
 const nocache = emptyCounter();
 await load(host, idb, nocache, { nocache: true });
 check("nocache load fetches", nocache.total, ASSETS.length + 1);
@@ -224,6 +242,7 @@ console.log(
     .length}, unchanged re-downloaded ${rebuilt.assets - 1}`,
 );
 console.log(`settled load: ${settled.total} fetch(es)`);
+console.log(`relative paths: ${relative.total} fetch(es), ${afterPrune.total} after a prune`);
 console.log(`cache refused: ${noCache.total} fetch(es) — page still starts`);
 console.log(`host mismatch: tampered asset fetched again (${retry.assets}) instead of stored`);
 console.log(`nocache=1:    ${nocache.total} fetch(es)`);
