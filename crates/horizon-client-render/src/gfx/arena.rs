@@ -5,7 +5,12 @@ use std::collections::BTreeMap;
 /// Ranges are rounded up to this many vertices to limit fragmentation, and
 /// start at multiples of it (`flat` names sections by these blocks).
 pub const GRAIN: u64 = 256;
-/// The largest page, in bytes.
+/// The largest page, in bytes. A page costs a buffer allocation, and growing
+/// one copies its contents on the GPU: a page that big is a stall a page
+/// cannot afford (the software renderer took 1.3 s in one submit).
+#[cfg(target_arch = "wasm32")]
+pub const PAGE_BYTES: u64 = 16 << 20;
+#[cfg(not(target_arch = "wasm32"))]
 pub const PAGE_BYTES: u64 = 256 << 20;
 
 /// Free vertex ranges: start -> length, never adjacent.
@@ -214,8 +219,12 @@ impl Arena {
                 return Some((i as u32, start));
             }
         }
+        // Growing copies the page on the GPU. The desktop's driver does that
+        // cheaply; a page's does not, so a page there starts a new buffer
+        // instead (one more draw call per page, no copy stall).
         let last = self.pages.len().saturating_sub(1);
-        if let Some(page) = self.pages.last().and_then(Option::as_ref)
+        if !cfg!(target_arch = "wasm32")
+            && let Some(page) = self.pages.last().and_then(Option::as_ref)
             && page.capacity < self.page_limit
         {
             let current = page.capacity;

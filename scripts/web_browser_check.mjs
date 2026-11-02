@@ -385,31 +385,61 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
     return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
   });
   await page.mouse.click(box.x, box.y);
+  // Spectator flight ignores collisions: at spawn the player can be against a
+  // wall, and 24 s of walking into it loads nothing (that is what made every
+  // earlier run report 149 -> 149 columns).
+  const command = async (line) => {
+    await page.keyboard.press("Slash");
+    await page.waitForTimeout(120);
+    await page.keyboard.type(line, { delay: 4 });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(250);
+  };
+  await command("/gamemode spectator");
+  await backToPlay(page);
   const before = await status(page);
   await page.evaluate(() => {
     window.__frames.worst = 0;
   });
   if (forceFailures > 0) await page.evaluate((n) => window.__horizonForceUploads(n), forceFailures);
   const from = await page.evaluate(() => performance.now());
-  // Control sprints: a walk covers too few columns for a chunk-crossing test.
-  await page.keyboard.down("Control");
-  await page.keyboard.down("w");
-  let after = before;
-  const started = Date.now();
-  while (Date.now() - started < 24_000) {
-    await new Promise((r) => setTimeout(r, 2000));
-    after = await status(page);
+  const sprint = async (ms, synthetic) => {
+    const started = Date.now();
+    const canvasEvent = (type) =>
+      page.evaluate(
+        ([kind]) =>
+          document
+            .getElementById("horizon-canvas")
+            .dispatchEvent(new KeyboardEvent(kind, { key: "w", code: "KeyW", bubbles: true })),
+        [type],
+      );
+    if (synthetic) await canvasEvent("keydown");
+    else await page.keyboard.down("w");
+    let state = before;
+    while (Date.now() - started < ms) {
+      await new Promise((r) => setTimeout(r, 1500));
+      state = await status(page);
+    }
+    if (synthetic) await canvasEvent("keyup");
+    else await page.keyboard.up("w");
+    return state;
+  };
+  const pos = (state) => (state && Array.isArray(state.player) ? state.player : null);
+  const gap = (a, b) => (a && b ? Math.hypot(b[0] - a[0], b[2] - a[2]) : 0);
+  let after = await sprint(24_000, false);
+  let moved = gap(pos(before), pos(after));
+  let how = "keys";
+  if (moved < 8) {
+    // Real key events may be swallowed before they reach winit; the page's own
+    // function keys are dispatched on the canvas, so try that path too.
+    after = await sprint(10_000, true);
+    moved = gap(pos(before), pos(after));
+    how = "synthetic";
   }
-  await page.keyboard.up("w");
-  await page.keyboard.up("Control");
   const to = await page.evaluate(() => performance.now());
   const task = await worstTask(page, from, to);
-  const gap = await page.evaluate(() => Math.round(window.__frames.worst));
+  const worstGap = await page.evaluate(() => Math.round(window.__frames.worst));
   // Movement is proven from the game's own player position, not assumed.
-  const pos = (state) => (state && Array.isArray(state.player) ? state.player : null);
-  const a = pos(before);
-  const b = pos(after);
-  const moved = a && b ? Math.hypot(b[0] - a[0], b[2] - a[2]) : 0;
   // The page publishes `generated`; the control readout's `generated_chunks`
   // never appears here, which is why this counted zero for every run.
   const generated = (after.generated || 0) - (before.generated || 0);
@@ -425,15 +455,16 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
   console.log(
     `  [${label}] run: moved ${moved.toFixed(1)} blocks, ${generated} chunk(s) generated, ` +
       `${before.chunks} -> ${after.chunks} resident, worst main-thread task ${task.ms} ms, ` +
-      `worst frame gap ${gap} ms, forced ${forceFailures} upload failure(s), ` +
+      `worst frame gap ${worstGap} ms (${how} keys), forced ${forceFailures} upload failure(s), ` +
       `deferred ${renderer.deferred_uploads || 0}, pending ${drained.pending_uploads || 0}, ` +
       `sections ${renderer.sections || 0} drawn ${renderer.detail_sections || 0}`,
   );
   return {
     ms: Math.round(to - from),
     task: task.ms,
-    gap,
+    gap: worstGap,
     moved,
+    how,
     generated,
     chunks: after.chunks,
     resident: (after.chunks || 0) - (before.chunks || 0),

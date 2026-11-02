@@ -5397,13 +5397,6 @@ impl Game<'_> {
         self.poll_autosave()?;
         // Unloaded chunks and a paused save queue writes too: the frame moves a
         // millisecond of them so the queue cannot grow into a stall.
-        horizon_client::spans::time("save_drain", || {
-            let drain = Instant::now();
-            let _ = self.save.write_some(WRITE_DRAIN);
-            if drain.elapsed() > Duration::from_millis(50) {
-                log::info!("Horizon: save drain took {:?}", drain.elapsed());
-            }
-        });
         if running {
             self.advance_clock();
         }
@@ -14191,6 +14184,16 @@ impl ApplicationHandler for Game<'_> {
                             self.sprint_report(&report);
                         }
                     }
+                    // One drain a frame, not one per tick: a batch of region
+                    // writes costs tens of milliseconds, and a frame that ran
+                    // three catch-up ticks paid for it three times.
+                    horizon_client::spans::time("save_drain", || {
+                        let drain = Instant::now();
+                        let _ = self.save.write_some(WRITE_DRAIN);
+                        if drain.elapsed() > Duration::from_millis(50) {
+                            log::info!("Horizon: save drain took {:?}", drain.elapsed());
+                        }
+                    });
                     self.extras_frame(elapsed);
                     self.extras_retry()?;
                     self.apply_mouse_look();
