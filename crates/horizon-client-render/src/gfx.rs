@@ -3084,6 +3084,17 @@ impl Renderer {
     pub fn draw_calls(&self) -> usize {
         self.draws.len()
     }
+    /// Terrain vertices in the sections placed right now.
+    pub fn terrain_vertices(&self) -> u64 {
+        self.sections
+            .values()
+            .map(|s| u64::from(s.solid + s.translucent) * 4)
+            .sum()
+    }
+    /// Pixels each frame renders to.
+    pub fn target_pixels(&self) -> u64 {
+        u64::from(self.config.width) * u64::from(self.config.height)
+    }
     /// Sections placed on the GPU.
     pub fn sections_len(&self) -> usize {
         self.sections.len()

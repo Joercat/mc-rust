@@ -14138,8 +14138,17 @@ impl ApplicationHandler for Game<'_> {
                         if steps > 0
                             && let Some(player) = self.player.as_mut()
                         {
-                            player.position.x += 4.0;
-                            WEB_DEBUG_MOVE.store(steps - 1, std::sync::atomic::Ordering::Relaxed);
+                            // Wait for the column ahead: stepping faster than
+                            // streaming unloads the world behind the player
+                            // (960 blocks moved, one column generated, 149 to
+                            // 0 resident).
+                            let next = ((player.position.x + 4.0).floor() as i32) >> 4;
+                            let z = (player.position.z.floor() as i32) >> 4;
+                            if self.world.chunks.contains_key(&(next, z)) {
+                                player.position.x += 4.0;
+                                WEB_DEBUG_MOVE
+                                    .store(steps - 1, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
                     let updated = Instant::now();
@@ -16520,6 +16529,8 @@ fn update_web_status(game: &Game<'_>) {
             "detail_sections": r.detail_sections(),
             "deferred_uploads": r.deferred_uploads(),
             "draws": r.draw_calls(),
+            "vertices": r.terrain_vertices(),
+            "pixels": r.target_pixels(),
         })
     });
     let json = serde_json::json!({

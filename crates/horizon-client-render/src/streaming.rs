@@ -940,7 +940,12 @@ impl Streaming {
             return;
         }
         // Generated columns are saved like edited ones, as vanilla saves
-        // every chunk it generates.
+        // every chunk it generates. A page cannot: exploring regenerates the
+        // terrain constantly, and every one of those saves rewrites a whole
+        // region file in a frame (30-58 ms each was most of the idle tick).
+        // The seed reproduces generated terrain, so only columns that were
+        // actually edited are saved there.
+        #[cfg(not(target_arch = "wasm32"))]
         if chunk.fresh {
             world.modified.insert(key);
         }
