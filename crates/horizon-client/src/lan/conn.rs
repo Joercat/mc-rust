@@ -442,6 +442,7 @@ pub fn serve_local(
     pipe: horizon_protocol::connection::Pipe,
     shared: Arc<Shared>,
 ) -> Result<(), String> {
+    log::info!("Horizon: lan: serving local");
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     serve_connection(Connection::local(pipe), address, shared)
 }
@@ -1008,6 +1009,7 @@ fn offer_pack(
 }
 
 fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::net::SocketAddr) {
+    log::info!("Horizon: lan: play for {}", parts.name);
     let conn_id = shared.next_id();
     let events = shared.events.clone();
     let _ = c.reader.set_read_timeout(Some(READ_TIMEOUT));

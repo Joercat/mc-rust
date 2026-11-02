@@ -135,7 +135,7 @@ impl Integrated {
                 if pending.settled() || horizon_core::time::Instant::now() > deadline {
                     return None;
                 }
-                std::thread::sleep(Duration::from_micros(200));
+                horizon_core::sync::sleep(Duration::from_micros(200));
             }
         }
         let deadline = horizon_core::time::Instant::now() + FRAME_CALL_BUDGET;
@@ -463,10 +463,12 @@ impl Game<'_> {
             launch.creative,
             launch.create.as_ref(),
         )?)?;
+        log::info!("Horizon: integrated server: world loaded");
         let saved = Box::new(self.level.clone());
         // IntegratedServer runs the server mods; the window the client mods.
         self.mods.dev = self.options.dev_mods.clone();
         self.start_mods();
+        log::info!("Horizon: integrated server: mods on");
         // Math.max(2, options.renderDistance): past vanilla's 32 when the
         // window's render distance is (Horizon's options go to 64).
         let view_distance = self.settings.render_distance.max(2);
@@ -508,8 +510,11 @@ impl Game<'_> {
             guest_commands: false,
             force_game_mode: false,
         };
+        log::info!("Horizon: integrated server: hub starting");
         self.lan_host(settings, net, config, None)?;
+        log::info!("Horizon: integrated server: hub up");
         let commands = self.allow_commands();
+        log::info!("Horizon: integrated server: connecting");
         let pipe = {
             let host = self
                 .lan
@@ -532,7 +537,9 @@ impl Game<'_> {
             pending: None,
         });
         let _ = ready.send(Ok((pipe, self.level.name.clone())));
+        log::info!("Horizon: integrated server: joined");
         self.settle_spawn()?;
+        log::info!("Horizon: integrated server: spawning settled");
         if let (Some(script), Some(output)) = (
             std::env::var_os("HORIZON_COMMAND_SCRIPT"),
             std::env::var_os("HORIZON_COMMAND_OUTPUT"),
@@ -905,6 +912,7 @@ fn serve(
     ready: &Sender<Ready>,
 ) -> Result<()> {
     let mut server = server_game(res, pack, options, settings)?;
+    log::info!("Horizon: integrated server: game ready");
     server.run_integrated(launch, flags, tasks, ready)
 }
 

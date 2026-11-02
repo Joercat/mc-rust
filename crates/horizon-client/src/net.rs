@@ -184,35 +184,56 @@ impl Session {
             (writer.clone(), counters.clone(), cookies.clone());
         let thread_configuring = configuring.clone();
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
-        let thread = std::thread::Builder::new()
-            .name("horizon-net".into())
-            .spawn(move || {
-                let result = run(
-                    local,
-                    &address_owned,
-                    &name_owned,
-                    auth.as_deref(),
-                    view_distance,
-                    &lang,
-                    &send,
-                    &thread_writer,
-                    &thread_configuring,
-                    &thread_counters,
-                    &thread_cookies,
-                    transferred,
-                    &resources,
-                );
-                let from_server = result.is_ok();
-                let reason = result.unwrap_or_else(|e| e);
-                if let Some(w) = horizon_core::sync::lock(&thread_writer).take() {
-                    w.shutdown();
-                }
-                let _ = send.send(Event::Disconnected {
-                    reason,
-                    from_server,
-                });
-            })
-            .ok();
+        let reader = move || {
+            let result = run(
+                local,
+                &address_owned,
+                &name_owned,
+                auth.as_deref(),
+                view_distance,
+                &lang,
+                &send,
+                &thread_writer,
+                &thread_configuring,
+                &thread_counters,
+                &thread_cookies,
+                transferred,
+                &resources,
+            );
+            let from_server = result.is_ok();
+            let reason = result.unwrap_or_else(|e| e);
+            if let Some(w) = horizon_core::sync::lock(&thread_writer).take() {
+                w.shutdown();
+            }
+            let _ = send.send(Event::Disconnected {
+                reason,
+                from_server,
+            });
+        };
+        // The reader is its own thread on a desktop. On the web wasm's std
+        // cannot spawn one (every Builder::spawn there reports unsupported),
+        // so the page's worker runs it instead; the writer stays on the main
+        // thread behind its mutex either way. Without a worker there is no
+        // session, as with the old failed spawn.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        let thread: Option<std::thread::JoinHandle<()>> = {
+            let started = horizon_threads::spawn_detached(reader);
+            if !started {
+                log::warn!("Horizon: session: the page never started a worker for the connection");
+            }
+            None
+        };
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        let thread: Option<std::thread::JoinHandle<()>> = {
+            let was_started = std::thread::Builder::new()
+                .name("horizon-net".into())
+                .spawn(reader)
+                .ok();
+            if was_started.is_none() {
+                log::warn!("Horizon: session: no thread for the connection");
+            }
+            was_started
+        };
         let debug = std::env::var_os("HORIZON_NET_DEBUG").is_some();
         Self {
             events,
