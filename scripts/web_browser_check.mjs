@@ -345,10 +345,16 @@ async function runSession({ label, stripIsolation, reload }) {
     sharedArrayBuffer: typeof SharedArrayBuffer !== "undefined",
     secureContext: window.isSecureContext,
   }));
+  // The page's own log keeps its last eight lines, so an early line (the reason
+  // it chose the single-threaded engine) is read from the console stream, which
+  // keeps everything.
   const lines = (await log(page)).split("\n");
-  const engineLine = lines.find((line) => line.includes("wasm engine ready")) || "(none)";
+  const everything = [...first.consoleLines, ...lines].join("\n");
+  const engineLine = everything.split("\n").find((line) => line.includes("wasm engine ready")) || "(none)";
   const choiceLine =
-    lines.find((line) => /threaded engine not built|single-threaded engine|engine stalled/.test(line)) || "(none)";
+    everything
+      .split("\n")
+      .find((line) => /threaded engine not built|single-threaded engine|engine stalled/.test(line)) || "(none)";
   console.log(`  [${label}] boot: ${bootResult.ms} ms`);
   console.log(`  [${label}] crossOriginIsolated: ${isolation.crossOriginIsolated}, SharedArrayBuffer: ${isolation.sharedArrayBuffer}`);
   console.log(`  [${label}] engine: ${engineLine}`);
