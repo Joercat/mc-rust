@@ -49,6 +49,10 @@ struct Flags {
     entity_distance: AtomicU32,
     /// `MinecraftServer.isCurrentlySaving`: the server is autosaving.
     saving: AtomicBool,
+    /// The thread's job reports its own end. On the web the server runs in a
+    /// page worker with no joinable handle, so the closing save waits on this
+    /// instead of on a thread.
+    finished: AtomicBool,
 }
 
 /// Work the window hands its server thread (`MinecraftServer.execute`).
@@ -160,12 +164,28 @@ impl Integrated {
         self.thread
             .as_ref()
             .is_none_or(|thread| thread.is_finished())
+            && self.flags.finished.load(Ordering::Relaxed)
     }
     fn halt(&mut self) -> Result<()> {
         self.request_stop();
         if let Some(thread) = self.thread.take() {
             horizon_core::sync::join(thread)
                 .map_err(|_| "the integrated server panicked")?;
+        }
+        // The page's worker has no joinable handle: its job reports its own
+        // end, and the window has already waited for it through the closing
+        // save while drawing. This covers a quit that skips that wait: the
+        // world's save is worth more on the way out than an instant close.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        {
+            let deadline = horizon_core::time::Instant::now() + Duration::from_secs(30);
+            while !self.flags.finished.load(Ordering::Relaxed) {
+                if horizon_core::time::Instant::now() > deadline {
+                    log::warn!("Horizon: the integrated server is still saving 30 s after quit");
+                    break;
+                }
+                std::hint::spin_loop();
+            }
         }
         match horizon_core::sync::lock(&self.flags.failure).as_ref() {
             Some(error) => Err(error.clone().into()),
@@ -298,12 +318,22 @@ impl Game<'_> {
         let (ready_tx, ready) = channel();
         let (tasks, server_tasks) = channel();
         let server_flags = flags.clone();
-        let thread = std::thread::Builder::new()
-            .name("Server thread".into())
-            .spawn(move || {
-                // MinecraftServer.spin's Thread.setPriority(8).
-                horizon_threads::favour_current();
-                let result = serve(
+        let server_job = move || {
+            // The window's closing save waits for this flag (Stage::Server),
+            // so the job marks its own end even when it dies mid-run.
+            struct Done(Arc<Flags>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.finished.store(true, Ordering::Relaxed);
+                }
+            }
+            let _done = Done(server_flags.clone());
+            // MinecraftServer.spin's Thread.setPriority(8).
+            horizon_threads::favour_current();
+            // A world load can panic deep inside worldgen; the window still
+            // needs the failure, not a joined channel that never arrived.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                serve(
                     &res,
                     pack,
                     options,
@@ -312,16 +342,48 @@ impl Game<'_> {
                     server_flags.clone(),
                     server_tasks,
                     &ready_tx,
-                );
-                if let Err(e) = result {
+                )
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
                     log::error!("Horizon: integrated server: {e}");
                     *horizon_core::sync::lock(&server_flags.failure) = Some(e.to_string());
                     let _ = ready_tx.send(Err(e.to_string()));
                 }
-            })?;
+                Err(panic) => {
+                    let value = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "the integrated server panicked".into());
+                    log::error!("Horizon: integrated server: {value}");
+                    *horizon_core::sync::lock(&server_flags.failure) = Some(value.clone());
+                    let _ = ready_tx.send(Err(value));
+                }
+            }
+        };
+        // On the web the job runs in a page worker: the main thread may not
+        // park on locks and std::thread cannot spawn a wasm thread, while the
+        // page's workers may block. The caller has checked that the pool
+        // started. A job panic is caught and surfaces through the ready
+        // channel above.
+        #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+        let thread: Option<JoinHandle<()>> = {
+            if !horizon_threads::spawn_detached(server_job) {
+                return Err("the page's worker pool refused the server job".into());
+            }
+            None
+        };
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+        let thread: Option<JoinHandle<()>> = Some(
+            std::thread::Builder::new()
+                .name("Server thread".into())
+                .spawn(server_job)?,
+        );
         let handle = Integrated {
             flags,
-            thread: Some(thread),
+            thread,
             tasks,
             world_name: String::new(),
         };

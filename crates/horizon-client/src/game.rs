@@ -9427,6 +9427,7 @@ impl Game<'_> {
             .options
             .execution_role
             .starts_integrated_server(self.options.server_thread)
+            && self.integrated_server_capable()
         {
             return self.open_integrated(folder, name, seed, creative, create);
         }
@@ -9449,6 +9450,14 @@ impl Game<'_> {
             return Ok(());
         }
         self.load_world(request)
+    }
+
+    /// Whether a world can run on its own thread from this build: on the web
+    /// the server is a page's worker, and the worker pool must be running
+    /// (the compiled check lives in the option itself).
+    fn integrated_server_capable(&self) -> bool {
+        !cfg!(all(target_arch = "wasm32", target_feature = "atomics"))
+            || horizon_threads::pool_size() > 0
     }
 
     /// Load authoritative world state synchronously, without client entry or
@@ -16559,7 +16568,11 @@ pub async fn run_web(
         dedicated: None,
         benchmark: None,
         dev_mods: Vec::new(),
-        server_thread: false,
+        // Single player runs its integrated server in a page worker when the
+        // browser gave the page shared memory (the threaded engine): a world
+        // tick then never holds up a frame. Without workers the world runs in
+        // the frame, as it always has.
+        server_thread: cfg!(all(target_arch = "wasm32", target_feature = "atomics")),
         execution_role: execution_role::ExecutionRole::Client,
     };
     // The web build has no env var to opt into diagnostics: always record the
