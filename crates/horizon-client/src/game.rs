@@ -1954,6 +1954,8 @@ struct Game<'a> {
     /// The world was saved for the application ending (`save_for_exit`).
     saved_for_exit: bool,
     pending_save: Option<saving::ClosingSave>,
+    /// A staged autosave: the frame does a couple of milliseconds of it.
+    pending_autosave: Option<saving::Autosave>,
     /// The world list's icon in progress (`GameRenderer.tryTakeScreenshotIfNeeded`):
     /// `None` without a local world, or once the save has its icon.png.
     world_icon: Option<WorldIcon>,
@@ -5383,8 +5385,9 @@ impl Game<'_> {
             serving.set_saving(self.autosaving);
         }
         if self.autosaving {
-            self.save_game_with(false)?;
+            self.begin_autosave()?;
         }
+        self.poll_autosave()?;
         if running {
             self.advance_clock();
         }
@@ -11196,6 +11199,8 @@ impl Game<'_> {
         )
     }
     fn apply_settings(&mut self) {
+        // The device's cap wins over the stored option, whichever path set it.
+        self.settings.clamp_distances();
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
@@ -14730,6 +14735,7 @@ impl<'a> Game<'a> {
             text_selection: Default::default(),
             saved_for_exit: false,
             pending_save: None,
+            pending_autosave: None,
             world_icon: None,
             forced_hit: None,
             tick_hit: None,
@@ -16382,12 +16388,35 @@ pub async fn run_web(
         .join("options.txt");
     let had_options = options_path.vfs_exists();
     let mut early_settings = Settings::load(&options_path);
+    // The launcher picks a profile from the hardware (`public/app.js`) and puts
+    // it in the query string: four threads and a few gigabytes get the fast
+    // preset and a render distance they can draw, and keep both, because the
+    // cap applies to every option change from then on.
+    let search = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default();
+    let cap = web_quality_cap(&search);
+    if let Some(cap) = cap {
+        early_settings.set_render_cap(cap);
+        if !had_options {
+            horizon_client::graphics::apply_preset(
+                horizon_client::graphics::Preset::Performance,
+                &mut early_settings,
+            );
+            early_settings.set_render_cap(cap);
+        }
+    }
     if !had_options {
         early_settings.render_distance = 6;
         early_settings.simulation_distance = 6;
     }
     if width < 800 {
         early_settings.render_distance = early_settings.render_distance.min(4);
+    }
+    if !had_options && cap.is_some() {
+        // Written once: the device starts with the settings it was given, and
+        // the sliders show them instead of the file's old defaults.
+        early_settings.save(&options_path);
     }
 
     Behaviours::set_cache_dir(
@@ -16900,5 +16929,20 @@ mod tests {
                 assert_eq!(toggles.is_down(SPRINT), sprint);
             }
         }
+    }
+}
+
+/// The render distance cap a `?quality=` profile asks for: the launcher measures
+/// the device, and the engine decides what that means for its options.
+fn web_quality_cap(search: &str) -> Option<i32> {
+    let value = search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|part| part.strip_prefix("quality="))?;
+    match value {
+        "low" => Some(8),
+        "balanced" => Some(12),
+        "high" => Some(horizon_client::options_file::MAX_RENDER_DISTANCE),
+        _ => None,
     }
 }

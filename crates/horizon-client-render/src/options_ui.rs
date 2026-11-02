@@ -315,12 +315,12 @@ impl Opt {
             | Opt::GlintStrength
             | Opt::PanoramaSpeed => Kind::Slider(s.file.double(self.file_key().unwrap()) as f32),
             Opt::Fov => unit(s.fov, 30.0, 110.0),
-            Opt::RenderDistance => unit(
-                s.render_distance as f32,
-                2.0,
-                crate::options_file::MAX_RENDER_DISTANCE as f32,
+            Opt::RenderDistance => unit(s.render_distance as f32, 2.0, s.render_distance_cap as f32),
+            Opt::SimulationDistance => unit(
+                s.simulation_distance as f32,
+                5.0,
+                32.0f32.min(s.render_distance_cap.max(5) as f32),
             ),
-            Opt::SimulationDistance => unit(s.simulation_distance as f32, 5.0, 32.0),
             Opt::Sensitivity => Kind::Slider(s.sensitivity),
             Opt::WheelSensitivity => unit(s.mouse_wheel_sensitivity, 0.01, 10.0),
             Opt::Volume(i) => Kind::Slider(if i == 0 {
@@ -717,11 +717,11 @@ impl Opt {
                 crate::options_file::V::Double(f64::from(v)),
             ),
             Opt::Fov => s.fov = step(30.0, 110.0),
-            Opt::RenderDistance => {
-                s.render_distance =
-                    step(2.0, crate::options_file::MAX_RENDER_DISTANCE as f32) as i32
+            Opt::RenderDistance => s.render_distance = step(2.0, s.render_distance_cap as f32) as i32,
+            Opt::SimulationDistance => {
+                s.simulation_distance =
+                    step(5.0, 32.0f32.min(s.render_distance_cap.max(5) as f32)) as i32
             }
-            Opt::SimulationDistance => s.simulation_distance = step(5.0, 32.0) as i32,
             Opt::Sensitivity => s.sensitivity = v,
             Opt::WheelSensitivity => s.mouse_wheel_sensitivity = 0.01 + v * 9.99,
             Opt::Volume(0) => s.master_volume = v,

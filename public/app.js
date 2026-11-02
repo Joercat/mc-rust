@@ -65,7 +65,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.10";
+const BUILD = "2026-11-01.11";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -155,6 +155,22 @@ async function pickRenderer(params) {
   const url = new URL(window.location.href);
   url.searchParams.set("backend", "webgl");
   window.history.replaceState(null, "", url);
+}
+
+// A device with four threads and a few gigabytes cannot draw a 32-chunk view:
+// ChromeOS' Kompanio-class parts sit here. The engine reads `quality` from the
+// query string, applies the fast preset on a first run and caps the render
+// distance for every later change, so the setting sticks instead of snapping
+// back to whatever options.txt holds.
+function pickQuality(params) {
+  if (params.get("quality")) return;
+  const cores = navigator.hardwareConcurrency || 4;
+  const memory = navigator.deviceMemory || 8;
+  if (cores > 4 && memory > 4) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("quality", "low");
+  window.history.replaceState(null, "", url);
+  say(`fast settings: ${cores} threads, ${memory} GB`);
 }
 
 async function loadEngine() {
@@ -507,6 +523,7 @@ async function boot() {
   const world = params.get("world");
   const creative = params.get("creative") !== "0";
   await pickRenderer(params);
+  pickQuality(params);
   await wasm.horizon_web_start("horizon-canvas", width, height, world, creative);
 
   phase("ready", 1.0);

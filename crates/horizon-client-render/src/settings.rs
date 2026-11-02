@@ -94,6 +94,9 @@ pub struct Settings {
     pub fov: f32,
     /// Chunks, 2..=32.
     pub render_distance: i32,
+    /// The most this device may ask for (`set_render_cap`): a phone-class CPU
+    /// draws few chunks, and the option must not offer more than it can draw.
+    pub render_distance_cap: i32,
     /// Chunks, 5..=32.
     pub simulation_distance: i32,
     /// 0..1, vanilla default 0.5.
@@ -202,6 +205,7 @@ impl Default for Settings {
         Self {
             fov: 70.0,
             render_distance: 12,
+            render_distance_cap: crate::options_file::MAX_RENDER_DISTANCE,
             simulation_distance: 12,
             sensitivity: 0.5,
             master_volume: 1.0,
@@ -379,6 +383,19 @@ impl Settings {
             },
         );
     }
+    /// Caps the render distance at what the hardware can draw, and applies the
+    /// cap to the value the options file holds already.
+    pub fn set_render_cap(&mut self, cap: i32) {
+        self.render_distance_cap = cap.clamp(2, crate::options_file::MAX_RENDER_DISTANCE);
+        self.clamp_distances();
+    }
+    /// Keeps the distances inside the device's cap. Every path that writes an
+    /// option goes through it, so a slider or `options-set` cannot lift it.
+    pub fn clamp_distances(&mut self) {
+        let cap = self.render_distance_cap;
+        self.render_distance = self.render_distance.clamp(2, cap);
+        self.simulation_distance = self.simulation_distance.clamp(5, 32.min(cap.max(5)));
+    }
     pub fn parse(text: &str) -> Self {
         Self::from_file(OptionsFile::parse(text))
     }
@@ -395,6 +412,7 @@ impl Settings {
         Self {
             fov: f.int("fov") as f32,
             render_distance: f.int("renderDistance"),
+            render_distance_cap: crate::options_file::MAX_RENDER_DISTANCE,
             simulation_distance: f.int("simulationDistance"),
             sensitivity: f.double("mouseSensitivity") as f32,
             master_volume: volumes[0],
@@ -485,7 +503,7 @@ impl Settings {
     pub fn to_file(&self) -> OptionsFile {
         let mut f = self.file.clone();
         put_i(&mut f, "fov", self.fov as i32);
-        put_i(&mut f, "renderDistance", self.render_distance);
+        put_i(&mut f, "renderDistance", self.render_distance.min(self.render_distance_cap));
         put_i(&mut f, "simulationDistance", self.simulation_distance);
         put_f(&mut f, "mouseSensitivity", self.sensitivity);
         for (i, source) in SOUND_SOURCES.iter().enumerate() {

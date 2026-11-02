@@ -234,6 +234,15 @@ files at all, the page stops with the same message the desktop client gives.
   often. Hiding the page also asks the game for an immediate save, and the page
   mirrors its files to IndexedDB every eight seconds and when it unloads, so a
   reload lands on the position the player left.
+- The autosave is staged: each frame does at most 2 ms of it (modified
+  chunks, then every resident chunk's entities, then the metadata), so the
+  thirty-second save no longer encodes the whole world inside one frame. The
+  pause save takes the same path on the server thread, a little per tick.
+- `public/app.js` measures the device (`hardwareConcurrency`, `deviceMemory`)
+  and puts `?quality=low` on a page with four threads and a few gigabytes. The
+  engine applies the Performance preset on a first run, saves it once, and caps
+  the render distance for that device (8 chunks at `low`, 12 at `balanced`), so
+  the slider cannot offer 128 chunks the device cannot draw.
 
 ## Threads
 

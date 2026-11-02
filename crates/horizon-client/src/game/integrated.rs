@@ -495,10 +495,14 @@ impl Game<'_> {
             if paused && !was_paused {
                 // IntegratedServer.tickServer: the tick the game pauses saves
                 // everything (saveEverything, without flushing), as an
-                // autosave does.
+                // autosave does. Staged like one: a pause that encoded every
+                // chunk in a single burst held the world's locks (and a weak
+                // device's cores) long enough for the page to stop drawing.
                 log::info!("Saving and pausing game...");
-                self.save_game_with(false)?;
+                self.begin_autosave()?;
             }
+            // A few milliseconds of the paused save per tick, between ticks.
+            self.poll_autosave()?;
             was_paused = paused;
             if paused {
                 // Only the connections run.

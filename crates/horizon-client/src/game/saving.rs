@@ -5,6 +5,21 @@ use horizon_client::{Result, hud::HudBatch};
 use std::{collections::HashSet, collections::VecDeque, time::Duration};
 use horizon_core::time::Instant;
 
+/// An autosave during play: the same snapshot work, spread over frames. A page
+/// cannot encode every modified chunk and every resident chunk's entities in
+/// one frame without hitching for hundreds of milliseconds.
+pub(super) struct Autosave {
+    keys: VecDeque<(i32, i32)>,
+    entities: Option<VecDeque<(i32, i32)>>,
+    stage: AutosaveStage,
+}
+enum AutosaveStage {
+    Chunks,
+    Entities,
+    Metadata,
+    Writes,
+}
+
 pub(super) struct ClosingSave {
     pub quit: bool,
     close: bool,
@@ -32,6 +47,8 @@ impl Game<'_> {
             save.quit |= quit;
             return Ok(());
         }
+        // The closing save writes every modified chunk itself.
+        self.pending_autosave = None;
         if self.title.is_some() || self.saved_for_exit {
             // A quit from the title still needs the event loop to finish.
             self.pending_save = Some(ClosingSave {
@@ -94,6 +111,7 @@ impl Game<'_> {
         if self.pending_save.is_some() {
             return Err("a world save is already in progress".into());
         }
+        self.pending_autosave = None;
         if all {
             self.world
                 .modified
@@ -113,6 +131,88 @@ impl Game<'_> {
         Ok(())
     }
 
+    /// The autosave: everything `save_game_with(false)` writes, in batches a
+    /// frame can afford. Started once per autosave tick, polled every frame.
+    pub(super) fn begin_autosave(&mut self) -> Result<()> {
+        if self.pending_save.is_some()
+            || self.pending_autosave.is_some()
+            || self.remote.is_some()
+            || self.title.is_some()
+        {
+            return Ok(());
+        }
+        self.save.save_forced_chunks(&self.streaming.forced)?;
+        self.streaming.save(&mut self.world, false);
+        self.pending_autosave = Some(Autosave {
+            keys: self.world.modified.drain().collect(),
+            entities: None,
+            stage: AutosaveStage::Chunks,
+        });
+        Ok(())
+    }
+    /// One frame's worth of the autosave, at most `SNAPSHOT_BUDGET`.
+    pub(super) fn poll_autosave(&mut self) -> Result<()> {
+        let Some(mut save) = self.pending_autosave.take() else {
+            return Ok(());
+        };
+        let started = Instant::now();
+        let mut finished = false;
+        let result = (|| -> Result<()> {
+            match save.stage {
+                AutosaveStage::Chunks => {
+                    while let Some(key) = save.keys.front().copied() {
+                        let chunks = self.with_entities(self.world.chunks.get(&key));
+                        self.save.save_later(
+                            &chunks,
+                            self.pack.assets.registry,
+                            self.res.biomes(),
+                        )?;
+                        self.world.modified.remove(&key);
+                        save.keys.pop_front();
+                        if started.elapsed() >= SNAPSHOT_BUDGET {
+                            return Ok(());
+                        }
+                    }
+                    self.spawn_loaded_entities();
+                    save.entities = Some(self.world.chunks.keys().copied().collect());
+                    save.stage = AutosaveStage::Entities;
+                }
+                AutosaveStage::Entities => {
+                    let keys = save.entities.get_or_insert_with(VecDeque::new);
+                    while let Some(key) = keys.front().copied() {
+                        let chunks = self.entity_chunks(&HashSet::from([key]), false);
+                        self.save.save_entities_later(chunks)?;
+                        keys.pop_front();
+                        if started.elapsed() >= SNAPSHOT_BUDGET {
+                            return Ok(());
+                        }
+                    }
+                    save.stage = AutosaveStage::Metadata;
+                }
+                AutosaveStage::Metadata => {
+                    self.prune_entity_memory();
+                    self.save_raids();
+                    self.save.save_forced_chunks(&self.streaming.forced)?;
+                    self.save_game_metadata()?;
+                    save.stage = AutosaveStage::Writes;
+                }
+                AutosaveStage::Writes => {
+                    finished = self.save.writes_finished()?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // A failed autosave is a log line, not a screen: the next one
+            // retries, and the closing save is the one that reports failures.
+            log::warn!("Horizon: autosave failed: {error}");
+            return Ok(());
+        }
+        if !finished {
+            self.pending_autosave = Some(save);
+        }
+        Ok(())
+    }
     /// `true` means the window can exit. The session lock stays in Game until
     /// every snapshot has been queued and every writer has synced its files.
     pub(super) fn poll_closing_save(&mut self) -> Result<bool> {

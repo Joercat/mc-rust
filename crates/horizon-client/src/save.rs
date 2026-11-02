@@ -1765,19 +1765,25 @@ fn write_region_records(
         let Some(region) = cached_region(cache, (rx, rz), &path, create)? else {
             continue;
         };
-        let mut region = horizon_core::sync::lock(&region);
+        // A page's reader that finds the region locked spins until it is free,
+        // so the lock is taken for a few records at a time: a save of hundreds
+        // of chunks never holds it long enough to be a frame.
+        const RECORDS_PER_LOCK: usize = 4;
         let mut changed = false;
-        for (pos, record) in &list {
-            match record {
-                Some(record) => {
-                    region.write(*pos, record)?;
-                    changed = true;
+        for batch in list.chunks(RECORDS_PER_LOCK) {
+            let mut region = horizon_core::sync::lock(&region);
+            for (pos, record) in batch {
+                match record {
+                    Some(record) => {
+                        region.write(*pos, record)?;
+                        changed = true;
+                    }
+                    None => changed |= region.clear(*pos, timestamp)?,
                 }
-                None => changed |= region.clear(*pos, timestamp)?,
             }
         }
         if changed {
-            region.sync()?;
+            horizon_core::sync::lock(&region).sync()?;
         }
     }
     Ok(())

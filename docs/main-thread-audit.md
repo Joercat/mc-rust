@@ -100,6 +100,18 @@ That is the deferral, not the game: it proves the frame never waits longer than
 a few microseconds for a 150 ms round trip, and that a request whose budget ran
 out is still answered. It does not measure opening a chest in a browser.
 
+## Saves are batches, not bursts
+
+An autosave used to encode every modified chunk, and every resident chunk's
+entities, in the frame it fired in. It is now staged the way the closing save
+is: at most `SNAPSHOT_BUDGET` (2 ms) of snapshotting per frame, then the
+metadata, then a poll of the region writer's counter — no wait, and no frame
+owns the whole save. The pause save runs the same staged path on the server
+thread, a few milliseconds per tick, so the page keeps drawing while it
+happens. `write_region_records` also takes its region lock for four records at a
+time instead of a whole region's worth, so a reader that finds it taken spins
+for a few writes rather than for a save.
+
 ## The page's own rules, measured
 
 `scripts/no_park_main_thread.sh` puts a host thread into exactly the page's
