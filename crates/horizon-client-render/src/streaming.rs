@@ -1116,7 +1116,8 @@ impl Streaming {
         // frame that notices is the stall a player feels crossing a border.
         // What is left waits in `deferred`, drained first next frame.
         let receive_budget = std::time::Duration::from_millis(if self.loading { 24 } else { 6 });
-        let receiving = std::time::Instant::now();
+        // The wasm-safe clock: std's `Instant::now` panics on wasm32.
+        let receiving = horizon_core::time::Instant::now();
         let mut todo = deferred.into_iter().chain(received);
         while let Some(done) = todo.next() {
             match done {
