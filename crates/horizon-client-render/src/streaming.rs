@@ -1096,13 +1096,29 @@ impl Streaming {
         self.scan_age = if sweep { 0 } else { self.scan_age + 1 };
         self.requeue();
         self.relight_edits(world);
-        let budget_ms = if self.loading { 24 } else { 10 };
+        // A page runs these jobs on its one thread, so every frame pays for
+        // them: a generation job that takes a tenth of a second is a visible
+        // hitch, and the budget that follows only decides when to stop.
+        let budget_ms = if cfg!(target_arch = "wasm32") {
+            if self.loading { 12 } else { 4 }
+        } else if self.loading {
+            24
+        } else {
+            10
+        };
         self.pump_inline(std::time::Duration::from_millis(budget_ms));
         let deferred = std::mem::take(&mut self.deferred);
         let received = self.shared.done.take();
         // Meshes made stale meanwhile, freed with the uploaded ones (`free`).
         let mut stale = Vec::new();
-        for done in deferred.into_iter().chain(received) {
+        // Receiving is not free either: a column's generation, lighting and
+        // meshing can all finish together, and taking every one of them in the
+        // frame that notices is the stall a player feels crossing a border.
+        // What is left waits in `deferred`, drained first next frame.
+        let receive_budget = std::time::Duration::from_millis(if self.loading { 24 } else { 6 });
+        let receiving = std::time::Instant::now();
+        let mut todo = deferred.into_iter().chain(received);
+        while let Some(done) = todo.next() {
             match done {
                 Done::Proto(x, z, proto, decorated) => {
                     self.generation_scan.exhausted = false;
@@ -1173,6 +1189,10 @@ impl Streaming {
                     self.meshed_total += 1;
                     uploads.push(((x, sy, z), mesh));
                 }
+            }
+            if receiving.elapsed() >= receive_budget {
+                self.deferred.extend(todo.by_ref());
+                break;
             }
         }
         self.free(stale);

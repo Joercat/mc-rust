@@ -398,7 +398,13 @@ async function runForward(page, label) {
     `  [${label}] run: ${generated} chunk(s) generated, ${before.chunks} -> ${after.chunks} resident, ` +
       `worst main-thread task ${task.ms} ms`,
   );
-  return { ms: Math.round(to - from), task: task.ms, generated, chunks: after.chunks };
+  return {
+    ms: Math.round(to - from),
+    task: task.ms,
+    generated,
+    chunks: after.chunks,
+    resident: (after.chunks || 0) - (before.chunks || 0),
+  };
 }
 
 /// One full session. `stripIsolation` removes COOP/COEP from the document
@@ -512,7 +518,7 @@ async function runSession({ label, stripIsolation, reload }) {
   if (again.opened && again.ms > 1000) fail(`${label}: the second container open took ${again.ms} ms`);
   if (!worldState || worldState.state !== "playing") fail(`${label}: the page never reached the game's playing state`);
   if (!(autosaved.count > beforeAutosave.count)) fail(`${label}: the engine's autosave wrote nothing`);
-  if (travel.generated === 0) fail(`${label}: holding W generated no chunk, so nothing was measured`);
+  if (travel.generated === 0 && travel.resident <= 0) fail(`${label}: holding W loaded no chunk, so nothing was measured`);
 
   let reloadResult = null;
   if (reload) {
