@@ -7901,6 +7901,11 @@ impl Game<'_> {
         self.physical_keys.contains(&KeyCode::ControlLeft)
             || self.physical_keys.contains(&KeyCode::ControlRight)
     }
+    /// The physical Alt keys: vanilla's hidden world types are Alt+click.
+    pub(super) fn has_alt_down(&self) -> bool {
+        self.physical_keys.contains(&KeyCode::AltLeft)
+            || self.physical_keys.contains(&KeyCode::AltRight)
+    }
     /// `hasClickedOutside` of the open screen at the cursor.
     fn clicked_outside(&self, batch: &HudBatch) -> bool {
         use horizon_client::container_screen::{Book, clicked_outside};
@@ -13607,8 +13612,10 @@ impl ApplicationHandler for Game<'_> {
                     let b = HudBatch::new(size);
                     let atlas = &self.gui.atlas;
                     let shift = self.has_shift_down();
+                    let alt = self.has_alt_down();
                     let (action, sound) = self.title.as_mut().map_or((Action::None, false), |t| {
-                        let clicked = t.click(self.cursor.0, self.cursor.1, (b.width, b.height));
+                        let clicked =
+                            t.click_with(self.cursor.0, self.cursor.1, (b.width, b.height), alt);
                         t.press_field(atlas, self.cursor, (b.width, b.height), shift);
                         let rules = t.press_rules(atlas, self.cursor, (b.width, b.height));
                         (clicked.0, clicked.1 || rules)
@@ -13618,6 +13625,26 @@ impl ApplicationHandler for Game<'_> {
                         self.audio.play_button_click();
                     }
                     self.title_action(event_loop, action)?;
+                }
+                // ChromeOS delivers Alt+click as a right click: on the world
+                // type button that is the same toggle, not a swallowed press.
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Right,
+                    ..
+                } if self.title.is_some() && self.screen != Screen::Options => {
+                    let size = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| [r.config.width, r.config.height])
+                        .unwrap_or([1, 1]);
+                    let b = HudBatch::new(size);
+                    let toggled = self.title.as_mut().is_some_and(|t| {
+                        t.click_right(self.cursor.0, self.cursor.1, (b.width, b.height))
+                    });
+                    if toggled {
+                        self.audio.play_button_click();
+                    }
                 }
                 WindowEvent::MouseInput { .. } if self.title.is_some() => {}
                 WindowEvent::MouseInput { state, button, .. } if self.book.is_some() => {

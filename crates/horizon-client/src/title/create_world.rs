@@ -112,7 +112,16 @@ impl WorldOptions {
             .map(super::flat::FlatSettings::to_tag)
     }
     /// A press on one of the open tab's cycle buttons or switches.
-    pub(super) fn press(&mut self, id: u8, creative: &mut bool) {
+    /// The debug world type on and off: Alt+click's gesture, and the right
+    /// click ChromeOS sends instead of it.
+    pub fn toggle_debug(&mut self) {
+        self.world_type = if self.world_type == crate::save::WorldPreset::Debug {
+            crate::save::WorldPreset::Normal
+        } else {
+            crate::save::WorldPreset::Debug
+        };
+    }
+    pub(super) fn press(&mut self, id: u8, creative: &mut bool, alt: bool) {
         match id {
             // Survival, Hardcore, Creative.
             20 => {
@@ -124,6 +133,7 @@ impl WorldOptions {
             }
             23 => self.difficulty = (self.difficulty + 1) % DIFFICULTIES.len(),
             24 => self.commands = Some(!self.commands(*creative)),
+            25 if alt => self.toggle_debug(),
             25 => {
                 self.world_type = self.world_type.next();
                 if self.world_type == crate::save::WorldPreset::Flat {
@@ -191,6 +201,16 @@ pub(super) fn field_at(w: f32, h: f32, tab: usize, (x, y): (f32, f32)) -> Option
 
 fn tr(key: &str) -> String {
     Text::translate(key, &[]).plain()
+}
+/// The world type's name; a world type the language files predate still says
+/// what it is.
+fn world_type_label(preset: crate::save::WorldPreset) -> String {
+    match preset {
+        crate::save::WorldPreset::Debug => {
+            crate::lang::get_or("generator.minecraft.debug_all_block_states", "Debug Mode")
+        }
+        preset => tr(preset.label()),
+    }
 }
 /// `CycleButton`'s "Label: Value" (`options.generic_value`).
 fn labelled(key: &str, value: String) -> String {
@@ -261,7 +281,7 @@ pub(super) fn buttons(w: f32, h: f32, creative: bool, o: &WorldOptions) -> Vec<B
                 gx,
                 gy,
                 150.0,
-                labelled("selectWorld.mapType", tr(o.world_type.label())),
+                labelled("selectWorld.mapType", world_type_label(o.world_type)),
                 true,
                 25,
             ),

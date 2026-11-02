@@ -1624,6 +1624,17 @@ impl Title {
     /// The action and whether to play `AbstractWidget.playButtonClickSound`.
     /// Navigation buttons can return `Action::None` while still sounding.
     pub fn click(&mut self, x: f32, y: f32, size: (f32, f32)) -> (Action, bool) {
+        self.click_with(x, y, size, false)
+    }
+    /// A left click with Alt held: on the world type button that is vanilla's
+    /// "Debug Mode" gesture.
+    pub fn click_with(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: (f32, f32),
+        alt: bool,
+    ) -> (Action, bool) {
         self.remember_direct_address();
         // The game rules take the press in `press_rules`, which has the atlas.
         if self.rules.get_mut().is_some() {
@@ -1658,12 +1669,19 @@ impl Title {
             self.flat_click(x, y, (w, h), hit);
             return (Action::None, hit.is_some());
         }
-        let action = self.click_action(x, y, (w, h), hit);
+        let action = self.click_action(x, y, (w, h), hit, alt);
         // World list selection is silent; launching its selected entry sounds.
         let sound = hit.is_some() || matches!(action, Action::Play { .. });
         (action, sound)
     }
-    fn click_action(&mut self, x: f32, y: f32, (w, h): (f32, f32), hit: Option<u8>) -> Action {
+    fn click_action(
+        &mut self,
+        x: f32,
+        y: f32,
+        (w, h): (f32, f32),
+        hit: Option<u8>,
+        alt: bool,
+    ) -> Action {
         match (&mut self.mode, hit) {
             (Mode::Main, Some(1)) => {
                 self.enter_singleplayer();
@@ -1882,7 +1900,7 @@ impl Title {
                 },
                 Some(id),
             ) if !matches!(id, 21 | 22 | 31) => {
-                options.press(id, creative);
+                options.press(id, creative, alt);
                 Action::None
             }
             (Mode::Create { .. }, Some(21)) => self.create_action(),
@@ -1910,6 +1928,25 @@ impl Title {
                 Action::None
             }
             _ => Action::None,
+        }
+    }
+    /// A right click: ChromeOS sends Alt+click as one of these, so on the world
+    /// type button it is the same toggle as Alt+left-click elsewhere.
+    pub fn click_right(&mut self, x: f32, y: f32, size: (f32, f32)) -> bool {
+        let (w, h) = (size.0.ceil(), size.1.ceil());
+        let on_type = self
+            .buttons(w, h)
+            .into_iter()
+            .any(|b| b.id == 25 && b.enabled && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + 20.0);
+        if !on_type {
+            return false;
+        }
+        match &mut self.mode {
+            Mode::Create { options, .. } => {
+                options.toggle_debug();
+                true
+            }
+            _ => false,
         }
     }
     /// The focused text field, its id and maximum length (copy and paste).

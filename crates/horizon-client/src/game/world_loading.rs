@@ -387,6 +387,14 @@ pub(super) fn make_streaming(
         dim.id(),
     )));
     let mut locator = None;
+    // A debug world: the dimension's generator type says so, and its chunks come
+    // from the state grid instead of terrain.
+    let debug = (dim == Dim::Overworld)
+        .then(|| horizon_client::save::world_gen_settings(world_root))
+        .flatten()
+        .and_then(|s| {
+            horizon_client::debuggen::DebugTerrain::from_settings(&s, pack.assets.registry)
+        });
     let flat = (dim == Dim::Overworld)
         .then(|| horizon_client::save::world_gen_settings(world_root))
         .flatten()
@@ -397,7 +405,18 @@ pub(super) fn make_streaming(
                 res.biomes(),
             )
         });
-    let mut streaming = if let Some(inner) = flat {
+    let mut streaming = if let Some(inner) = debug {
+        Streaming::new(
+            Arc::new(Persistent {
+                inner: Arc::new(inner),
+                save: save.clone(),
+                registry: pack.assets.clone(),
+                biomes: res.biomes().clone(),
+            }),
+            pack.context.clone(),
+            res.threads(),
+        )
+    } else if let Some(inner) = flat {
         Streaming::new(
             Arc::new(Persistent {
                 inner: Arc::new(inner),

@@ -875,6 +875,7 @@ fn create_world_tabs_follow_vanilla_and_their_choices_reach_the_action() {
         crate::save::WorldPreset::LargeBiomes,
         crate::save::WorldPreset::Amplified,
         crate::save::WorldPreset::SingleBiomeSurface,
+        crate::save::WorldPreset::Debug,
         crate::save::WorldPreset::Normal,
     ] {
         f.title.click(world[0].1 + 10.0, world[0].2 + 10.0, size);
@@ -926,6 +927,65 @@ fn create_world_tabs_follow_vanilla_and_their_choices_reach_the_action() {
     // Cancel removes the folder (removeTempDataPackDir).
     f.title.escape();
     assert!(!dir.exists());
+}
+
+#[test]
+fn the_debug_world_type_is_a_visible_choice_and_both_gestures_flip_it() {
+    let mut f = Fixture::new();
+    f.click("Singleplayer");
+    let size = (480.0, 262.0);
+    // Create New World's World tab, where the world type lives.
+    f.click("Create New World");
+    f.title.click(54.0 + 124.0 + 10.0, 10.0, size);
+    let world_type_button = |f: &Fixture| {
+        f.title
+            .buttons(size.0, size.1)
+            .into_iter()
+            .find(|b| b.id == 25)
+            .expect("the world type button")
+    };
+    let world_type = |f: &Fixture| {
+        let Mode::Create { options, .. } = &f.title.mode else {
+            panic!("not on the create screen")
+        };
+        options.world_type
+    };
+    let button = world_type_button(&f);
+    let (x, y) = (button.x + 10.0, button.y + 10.0);
+
+    // No modifier at all: the cycle reaches Debug Mode on its own.
+    assert_eq!(world_type(&f), crate::save::WorldPreset::Normal);
+    for _ in 0..crate::save::WorldPreset::ALL.len() - 1 {
+        f.title.click(x, y, size);
+    }
+    assert_eq!(world_type(&f), crate::save::WorldPreset::Debug);
+    // Its label says what it is, and Create carries it into the world.
+    let label = world_type_button(&f).label;
+    assert!(label.contains("Debug"), "{label}");
+    let Action::Create { options, .. } = f.title.create_action() else {
+        panic!()
+    };
+    assert_eq!(options.world_gen().preset, crate::save::WorldPreset::Debug);
+
+    // Alt+click: vanilla's gesture, and it toggles back.
+    f.title
+        .click_with(x, y, size, false)
+        .0
+        .eq(&Action::None)
+        .then_some(())
+        .unwrap();
+    assert_ne!(world_type(&f), crate::save::WorldPreset::Debug);
+    f.title.click_with(x, y, size, true);
+    assert_eq!(world_type(&f), crate::save::WorldPreset::Debug);
+
+    // A right click is what ChromeOS sends for Alt+click: same toggle.
+    assert!(f.title.click_right(x, y, size));
+    assert_eq!(world_type(&f), crate::save::WorldPreset::Normal);
+    assert!(f.title.click_right(x, y, size));
+    assert_eq!(world_type(&f), crate::save::WorldPreset::Debug);
+    // A right click anywhere else does nothing.
+    assert!(!f.title.click_right(2.0, 2.0, size));
+    assert_eq!(world_type(&f), crate::save::WorldPreset::Debug);
 }
 
 #[test]

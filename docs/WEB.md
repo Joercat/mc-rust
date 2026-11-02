@@ -234,6 +234,12 @@ files at all, the page stops with the same message the desktop client gives.
   often. Hiding the page also asks the game for an immediate save, and the page
   mirrors its files to IndexedDB every eight seconds and when it unloads, so a
   reload lands on the position the player left.
+- **Debug Mode** is a world type on the create screen's World tab, in the
+  cycle after Single Biome: every block state once, in a square grid at y 70
+  over a barrier platform at y 69 (`debuggen`, vanilla's `DebugLevelSource`).
+  Alt+click on World Type and a right click on it (what ChromeOS sends for
+  Alt+click) toggle it too. Its chunks come from the same worker-thread
+  pipeline as any world, so the frame is not where they are built.
 - The autosave is staged: each frame does at most 2 ms of it (modified
   chunks, then every resident chunk's entities, then the metadata), so the
   thirty-second save no longer encodes the whole world inside one frame. The

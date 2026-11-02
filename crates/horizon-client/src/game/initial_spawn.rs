@@ -79,6 +79,16 @@ impl Game<'_> {
     }
     /// ChunkGenerator.getOrigin and getSpawnHeight of the overworld.
     fn spawn_origin(&self) -> Result<((i32, i32), i32)> {
+        if let Some(debug) = horizon_client::save::world_gen_settings(&self.world_root)
+            .and_then(|s| {
+                horizon_client::debuggen::DebugTerrain::from_settings(
+                    &s,
+                    self.pack.assets.registry,
+                )
+            })
+        {
+            return Ok(((0, 0), debug.spawn_height()));
+        }
         if let Some(flat) =
             horizon_client::save::world_gen_settings(&self.world_root).and_then(|s| {
                 horizon_client::flatgen::FlatTerrain::from_settings(

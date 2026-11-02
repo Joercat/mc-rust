@@ -2697,15 +2697,19 @@ pub enum WorldPreset {
     LargeBiomes,
     Amplified,
     SingleBiomeSurface,
+    /// `worldgen/world_preset/debug_all_block_states`: every block state once,
+    /// in a grid over a barrier platform (`debuggen`).
+    Debug,
 }
 impl WorldPreset {
     /// The presets, in the order the world-type button cycles through them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Normal,
         Self::Flat,
         Self::LargeBiomes,
         Self::Amplified,
         Self::SingleBiomeSurface,
+        Self::Debug,
     ];
     /// The preset's registry id (`minecraft:normal`).
     pub const fn id(self) -> &'static str {
@@ -2715,6 +2719,7 @@ impl WorldPreset {
             Self::LargeBiomes => "minecraft:large_biomes",
             Self::Amplified => "minecraft:amplified",
             Self::SingleBiomeSurface => "minecraft:single_biome_surface",
+            Self::Debug => "minecraft:debug_all_block_states",
         }
     }
     /// The preset an id names, if it is one of them.
@@ -2730,6 +2735,7 @@ impl WorldPreset {
             Self::LargeBiomes => "generator.minecraft.large_biomes",
             Self::Amplified => "generator.minecraft.amplified",
             Self::SingleBiomeSurface => "generator.minecraft.single_biome_surface",
+            Self::Debug => "generator.minecraft.debug_all_block_states",
         }
     }
     /// The preset the world-type button cycles to next.
@@ -2744,8 +2750,10 @@ impl WorldPreset {
     /// the preset, and the single-biome preset shares the overworld's noise
     /// settings, so its fixed biome source tells the two apart.
     pub fn of_generator(generator: &Tag) -> Self {
-        if text(generator.get("type")).as_deref() == Some("minecraft:flat") {
-            return Self::Flat;
+        match text(generator.get("type")).as_deref() {
+            Some("minecraft:flat") => return Self::Flat,
+            Some("minecraft:debug") => return Self::Debug,
+            _ => {}
         }
         let source = generator.get("biome_source");
         let fixed = text(source.and_then(|s| s.get("type"))).as_deref() == Some("minecraft:fixed");
@@ -2889,6 +2897,14 @@ pub fn write_world_gen_settings_with(
     // The overworld generator of worldgen/world_preset/<preset>.json: the
     // noise settings and the biome source each preset uses.
     let overworld = match options.preset {
+        // DebugLevelSource: a dimension whose generator writes the state grid.
+        WorldPreset::Debug => Tag::compound([
+            ("type", string("minecraft:overworld")),
+            (
+                "generator",
+                Tag::compound([("type", string("minecraft:debug"))]),
+            ),
+        ]),
         WorldPreset::Flat => flat,
         WorldPreset::LargeBiomes => dimension(
             "minecraft:overworld",
