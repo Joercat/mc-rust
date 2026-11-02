@@ -14119,8 +14119,18 @@ impl ApplicationHandler for Game<'_> {
                     // tick's length, the rest are dropped (`FixedStep::tick_fits`).
                     let in_frame = self.remote.is_none();
                     let mut spent = Duration::ZERO;
+                    // A frame catches up at most this many ticks after a stall.
+                    // Catching up is exempt from the per-tick budget above (a
+                    // sprinting clock), so a long stall used to run ten ticks
+                    // back to back and hold the picture for a third of a
+                    // second. Four keeps the catch-up inside a frame; the rest
+                    // are dropped as behind, with vanilla's warning.
+                    #[cfg(target_arch = "wasm32")]
+                    const MAX_CATCH_UP: u32 = 4;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    const MAX_CATCH_UP: u32 = 10;
                     for step in 0..steps {
-                        if in_frame && !self.clock.tick_fits(spent) {
+                        if in_frame && (step >= MAX_CATCH_UP || !self.clock.tick_fits(spent)) {
                             if let Some(warning) = self.clock.drop_ticks(steps - step) {
                                 log::warn!("{warning}");
                             }

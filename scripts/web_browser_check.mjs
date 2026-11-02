@@ -227,6 +227,53 @@ async function forceSave(page, label) {
   return { ...after, ms };
 }
 
+/// The worst long task that overlaps [from, to] in page time (performance.now).
+async function worstTask(page, from, to) {
+  const tasks = await page.evaluate(() => window.__longtasks);
+  let worst = { start: 0, ms: 0 };
+  for (const task of tasks) {
+    if (task.start + task.ms >= from && task.start <= to && task.ms > worst.ms) worst = task;
+  }
+  return worst;
+}
+
+/// A left click in the middle of the game view, timed with the worst main
+/// thread task it caused: this is what "it freezes when I click" means.
+async function clickCenter(page, label) {
+  const box = await page.evaluate(() => {
+    const rect = document.getElementById("horizon-canvas").getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  });
+  const from = await page.evaluate(() => performance.now());
+  await page.mouse.click(box.x, box.y, { button: "left" });
+  const to = await page.evaluate(() => performance.now());
+  const task = await worstTask(page, from, to);
+  console.log(
+    `  [${label}] click took ${Math.round(to - from)} ms end to end, worst main-thread task ${task.ms} ms`,
+  );
+  return { ms: Math.round(to - from), task: task.ms };
+}
+
+/// Put a couple of stacks in every chest placed in front of the player, so the
+/// first container a session opens really has item models to draw (an empty
+/// chest never draws one, and the first item drawn is the expensive one).
+async function fillChests(page) {
+  for (const at of ["~1 ~1 ~", "~-1 ~1 ~", "~ ~1 ~1", "~ ~1 ~-1", "~1 ~1 ~1", "~-1 ~1 ~-1"]) {
+    for (const line of [
+      `item replace block ${at} container.0 with minecraft:diamond 3`,
+      `item replace block ${at} container.1 with minecraft:apple 5`,
+    ]) {
+      await page.keyboard.press("Slash");
+      await page.waitForTimeout(120);
+      await page.keyboard.type(line, { delay: 4 });
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(180);
+    }
+  }
+  await page.waitForTimeout(300);
+  return backToPlay(page);
+}
+
 /// One use of whatever is in front of the player. The engine reports a screen
 /// by leaving "playing" while not paused.
 async function useOnce(page, label) {
@@ -235,22 +282,25 @@ async function useOnce(page, label) {
     return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
   });
   const t0 = Date.now();
+  const from = await page.evaluate(() => performance.now());
   await page.mouse.click(box.x, box.y, { button: "right" });
   const clickMs = Date.now() - t0;
   for (let i = 0; i < 300; i += 1) {
     const state = await status(page);
     if (state && state.state === "menu" && state.pause === false) {
       const ms = Date.now() - t0;
+      const to = await page.evaluate(() => performance.now());
+      const task = await worstTask(page, from, to);
       console.log(
-        `  [${label}] container screen after ${ms} ms (click dispatch ${clickMs} ms, probe cadence 50 ms)`,
+        `  [${label}] container screen after ${ms} ms (worst main-thread task ${task.ms} ms, click dispatch ${clickMs} ms)`,
       );
-      return { opened: true, ms, clickMs };
+      return { opened: true, ms, clickMs, task: task.ms };
     }
     await new Promise((r) => setTimeout(r, 10));
   }
   const state = await status(page);
   console.log(`  [${label}] no container screen: state ${state && state.state}, pause ${state && state.pause}`);
-  return { opened: false, ms: Date.now() - t0 };
+  return { opened: false, ms: Date.now() - t0, task: 0 };
 }
 
 /// Back to play: a chat screen left open by the commands, or a pause menu an
@@ -383,9 +433,15 @@ async function runSession({ label, stripIsolation, reload }) {
 
   const placedState = await placeChests(page);
   console.log(`  [${label}] after placing chests: state ${placedState && placedState.state}, pause ${placedState && placedState.pause}`);
-  const chest = await useOnce(page, `${label} chest`);
-  let again = { opened: false, ms: 0 };
+  const filledState = await fillChests(page);
+  console.log(`  [${label}] after filling chests: state ${filledState && filledState.state}`);
+  const chest = await useOnce(page, `${label} chest cold`);
+  let again = { opened: false, ms: 0, task: 0 };
+  const moves = [];
   if (chest.opened) {
+    // Pick a stack up and put it back: the first item the container draws.
+    moves.push(await clickCenter(page, `${label} chest take`));
+    moves.push(await clickCenter(page, `${label} chest put`));
     await page.keyboard.press("Escape");
     const closed = await waitState(page, "playing");
     if (!closed || closed.state !== "playing") fail(`${label}: Escape did not return to play (${closed && closed.state})`);
@@ -423,6 +479,9 @@ async function runSession({ label, stripIsolation, reload }) {
   if (worst(inPlay) > 1000) fail(`${label}: a ${worst(inPlay)} ms block happened while playing`);
   if (!chest.opened) fail(`${label}: no container screen opened from the right-click`);
   if (chest.opened && chest.ms > 1000) fail(`${label}: the container took ${chest.ms} ms to appear`);
+  for (const move of moves) {
+    if (move.task > 1000) fail(`${label}: a container click held the frame for ${move.task} ms`);
+  }
   if (!again.opened) fail(`${label}: the second click did not reopen the container`);
   if (again.opened && again.ms > 1000) fail(`${label}: the second container open took ${again.ms} ms`);
   if (!worldState || worldState.state !== "playing") fail(`${label}: the page never reached the game's playing state`);
@@ -462,6 +521,7 @@ async function runSession({ label, stripIsolation, reload }) {
     autosaved,
     chest,
     again,
+    moves,
     worstInPlay: worst(inPlay),
     worstLoading: worst(atBoot),
     cacheKeys: cache.keys,
@@ -492,8 +552,9 @@ const summary = (session) =>
     `engine="${session.engineLine.replace("wasm engine ready ", "")}"`,
     `state=${session.worldState && session.worldState.state}`,
     `saves=${session.saves.length}`,
-    `chest=${session.chest.opened ? `${session.chest.ms}ms` : "failed"}`,
-    `chest again=${session.again.opened ? `${session.again.ms}ms` : "failed"}`,
+    `chest=${session.chest.opened ? `${session.chest.ms}ms(tasks ${session.chest.task}ms)` : "failed"}`,
+    `chest again=${session.again.opened ? `${session.again.ms}ms(tasks ${session.again.task}ms)` : "failed"}`,
+    `chest pick=${session.moves.length > 0 ? `${session.moves.map((m) => m.task).join("/")}ms` : "failed"}`,
     `Atomics.wait=${session.atomics}`,
     `worst in play=${session.worstInPlay}ms`,
     `worst loading=${session.worstLoading}ms`,
