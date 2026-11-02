@@ -145,6 +145,14 @@ mod web_entry {
         crate::game::web_status_json()
     }
 
+    /// Fail the next `n` section placements, to prove a full terrain arena
+    /// leaves no section undrawn (the browser harness calls this).
+    #[wasm_bindgen]
+    pub fn horizon_web_force_upload_failures(n: u32) {
+        install_hooks();
+        crate::game::request_web_force_uploads(n);
+    }
+
     /// Ask the game to save the world (the page is hidden or closing).
     #[wasm_bindgen]
     pub fn horizon_web_request_save() {

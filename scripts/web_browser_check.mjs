@@ -378,10 +378,21 @@ const browser = await chromium.launch({
 
 /// Run across chunk borders holding the keys a player holds: the path that
 /// generates, meshes and uploads chunks under the player's feet.
-async function runForward(page, label) {
+async function runForward(page, label, { forceFailures = 0 } = {}) {
+  // The canvas takes the keys: click it first, as a player does.
+  const box = await page.evaluate(() => {
+    const rect = document.getElementById("horizon-canvas").getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  });
+  await page.mouse.click(box.x, box.y);
   const before = await status(page);
+  await page.evaluate(() => {
+    window.__frames.worst = 0;
+  });
+  if (forceFailures > 0) await page.evaluate((n) => window.__horizonForceUploads(n), forceFailures);
   const from = await page.evaluate(() => performance.now());
-  await page.keyboard.down("Shift");
+  // Control sprints: a walk covers too few columns for a chunk-crossing test.
+  await page.keyboard.down("Control");
   await page.keyboard.down("w");
   let after = before;
   const started = Date.now();
@@ -390,20 +401,47 @@ async function runForward(page, label) {
     after = await status(page);
   }
   await page.keyboard.up("w");
-  await page.keyboard.up("Shift");
+  await page.keyboard.up("Control");
   const to = await page.evaluate(() => performance.now());
   const task = await worstTask(page, from, to);
-  const generated = (after.generated_chunks || 0) - (before.generated_chunks || 0);
+  const gap = await page.evaluate(() => Math.round(window.__frames.worst));
+  // Movement is proven from the game's own player position, not assumed.
+  const pos = (state) => (state && Array.isArray(state.player) ? state.player : null);
+  const a = pos(before);
+  const b = pos(after);
+  const moved = a && b ? Math.hypot(b[0] - a[0], b[2] - a[2]) : 0;
+  // The page publishes `generated`; the control readout's `generated_chunks`
+  // never appears here, which is why this counted zero for every run.
+  const generated = (after.generated || 0) - (before.generated || 0);
+  // Everything forced to wait must find room again: the phase is not over
+  // until the upload queue has drained.
+  let drained = after;
+  for (let i = 0; i < 80; i += 1) {
+    if ((drained.pending_uploads || 0) === 0) break;
+    await new Promise((r) => setTimeout(r, 250));
+    drained = await status(page);
+  }
+  const renderer = drained.renderer || {};
   console.log(
-    `  [${label}] run: ${generated} chunk(s) generated, ${before.chunks} -> ${after.chunks} resident, ` +
-      `worst main-thread task ${task.ms} ms`,
+    `  [${label}] run: moved ${moved.toFixed(1)} blocks, ${generated} chunk(s) generated, ` +
+      `${before.chunks} -> ${after.chunks} resident, worst main-thread task ${task.ms} ms, ` +
+      `worst frame gap ${gap} ms, forced ${forceFailures} upload failure(s), ` +
+      `deferred ${renderer.deferred_uploads || 0}, pending ${drained.pending_uploads || 0}, ` +
+      `sections ${renderer.sections || 0} drawn ${renderer.detail_sections || 0}`,
   );
   return {
     ms: Math.round(to - from),
     task: task.ms,
+    gap,
+    moved,
     generated,
     chunks: after.chunks,
     resident: (after.chunks || 0) - (before.chunks || 0),
+    deferred: renderer.deferred_uploads || 0,
+    pending: drained.pending_uploads || 0,
+    sections: renderer.sections || 0,
+    detail: renderer.detail_sections || 0,
+    forced: forceFailures,
   };
 }
 
@@ -481,7 +519,7 @@ async function runSession({ label, stripIsolation, reload }) {
     await waitState(page, "playing", 3000);
   }
 
-  const travel = await runForward(page, label);
+  const travel = await runForward(page, label, { forceFailures: 60 });
   console.log(`  [${label}] running for autosaves…`);
   const beforeAutosave = await savedFiles(page);
   await new Promise((r) => setTimeout(r, 70_000));
@@ -518,7 +556,17 @@ async function runSession({ label, stripIsolation, reload }) {
   if (again.opened && again.ms > 1000) fail(`${label}: the second container open took ${again.ms} ms`);
   if (!worldState || worldState.state !== "playing") fail(`${label}: the page never reached the game's playing state`);
   if (!(autosaved.count > beforeAutosave.count)) fail(`${label}: the engine's autosave wrote nothing`);
+  if (travel.moved < 8) {
+    fail(`${label}: holding W moved ${travel.moved.toFixed(1)} blocks, so the chunk-crossing phase never ran`);
+  }
   if (travel.generated === 0 && travel.resident <= 0) fail(`${label}: holding W loaded no chunk, so nothing was measured`);
+  if (travel.pending > 0) fail(`${label}: ${travel.pending} section upload(s) never found room after a load burst`);
+  if (travel.detail < travel.sections) {
+    fail(`${label}: ${travel.sections - travel.detail} section(s) placed but not drawn after a load burst`);
+  }
+  if (travel.forced > 0 && travel.deferred === 0) {
+    fail(`${label}: the forced upload failures never reached the retry path`);
+  }
 
   let reloadResult = null;
   if (reload) {

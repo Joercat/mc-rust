@@ -557,6 +557,10 @@ pub struct Renderer {
     block_entity_revision: u64,
     /// An upload has already explained that the terrain arena is full.
     upload_full_logged: bool,
+    /// Section placements forced to fail, to exercise the retry path.
+    forced_upload_failures: u32,
+    /// Uploads that found no room and wait for a later frame.
+    uploads_deferred: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     occlusion: occlusion::Occlusion,
     /// Resolution scale, FXAA and TAA (Horizon settings).
@@ -2819,6 +2823,8 @@ impl Renderer {
             block_entities: Default::default(),
             block_entity_revision: next_block_entity_revision(),
             upload_full_logged: false,
+            forced_upload_failures: 0,
+            uploads_deferred: 0,
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             world_post,
             hdr: None,
@@ -3074,6 +3080,25 @@ impl Renderer {
         ((c.entities && !c.only_player) || c.blocks, c.entities)
     }
 
+    /// Sections placed on the GPU.
+    pub fn sections_len(&self) -> usize {
+        self.sections.len()
+    }
+    /// Sections recorded as drawn (a bit per section in `detail_columns`).
+    pub fn detail_sections(&self) -> usize {
+        self.detail_columns
+            .values()
+            .map(|m| (*m as u64).count_ones() as usize)
+            .sum()
+    }
+    /// Uploads that found no room and wait for a later frame.
+    pub fn deferred_uploads(&self) -> u64 {
+        self.uploads_deferred
+    }
+    /// Fail the next `n` section placements (a test of the arena-full path).
+    pub fn force_upload_failures(&mut self, n: u32) {
+        self.forced_upload_failures = n;
+    }
     pub fn has_section(&self, key: SectionKey) -> bool {
         self.sections.contains(key)
     }
@@ -3096,6 +3121,7 @@ impl Renderer {
             match self.upload_mesh(mesh) {
                 Some(section) => Some(section),
                 None => {
+                    self.uploads_deferred += 1;
                     if !std::mem::replace(&mut self.upload_full_logged, true) {
                         log::warn!(
                             "Horizon: terrain memory is full; section uploads wait for room \
@@ -3127,6 +3153,10 @@ impl Renderer {
         true
     }
     fn upload_mesh(&mut self, mesh: &SectionMesh) -> Option<SectionGpu> {
+        if self.forced_upload_failures > 0 {
+            self.forced_upload_failures -= 1;
+            return None;
+        }
         let solid = (mesh.solid.len() / 4) as u32;
         let translucent = (mesh.translucent.len() / 4) as u32;
         if solid + translucent == 0 {

@@ -5397,11 +5397,13 @@ impl Game<'_> {
         self.poll_autosave()?;
         // Unloaded chunks and a paused save queue writes too: the frame moves a
         // millisecond of them so the queue cannot grow into a stall.
-        let drain = Instant::now();
-        let _ = self.save.write_some(WRITE_DRAIN);
-        if drain.elapsed() > Duration::from_millis(50) {
-            log::info!("Horizon: save drain took {:?}", drain.elapsed());
-        }
+        horizon_client::spans::time("save_drain", || {
+            let drain = Instant::now();
+            let _ = self.save.write_some(WRITE_DRAIN);
+            if drain.elapsed() > Duration::from_millis(50) {
+                log::info!("Horizon: save drain took {:?}", drain.elapsed());
+            }
+        });
         if running {
             self.advance_clock();
         }
@@ -5411,8 +5413,10 @@ impl Game<'_> {
         self.tick_totem();
         self.update_totem_ready();
         self.tick_command_extras();
-        self.native_tick();
-        self.tell_native_now();
+        horizon_client::spans::time("native_tick", || {
+            self.native_tick();
+            self.tell_native_now();
+        });
         let camera_eye = self.camera_eye_height();
         let stick = self.pad_move();
         if self.riding.is_some() && self.player.is_some() {
@@ -13145,6 +13149,7 @@ impl Game<'_> {
         }
         let (far_distance, far_reduced) = self.far_terrain_choice();
         if let Some(renderer) = self.renderer.as_mut() {
+            renderer.force_upload_failures(take_web_force_uploads());
             let g = &self.settings.horizon;
             // A page cannot afford the frame a burst of freshly meshed
             // sections lands in: the budget path below is the only one that
@@ -16425,8 +16430,20 @@ static WEB_LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(
 #[cfg(target_arch = "wasm32")]
 static WEB_SAVE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Section placements the next frame must fail, to exercise the retry path
+/// (the browser harness sets it; nothing in the game does).
+static WEB_FORCE_UPLOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Asks the next frame to save the world (a hidden or closing page).
 #[cfg(target_arch = "wasm32")]
+pub fn request_web_force_uploads(n: u32) {
+    WEB_FORCE_UPLOADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn take_web_force_uploads() -> u32 {
+    WEB_FORCE_UPLOADS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn request_web_save() {
     WEB_SAVE_REQUEST.store(true, std::sync::atomic::Ordering::Relaxed);
 }
@@ -16473,6 +16490,13 @@ fn update_web_status(game: &Game<'_>) {
         .player
         .as_ref()
         .map(|pl| [pl.position.x, pl.position.y, pl.position.z]);
+    let renderer = game.renderer.as_ref().map(|r| {
+        serde_json::json!({
+            "sections": r.sections_len(),
+            "detail_sections": r.detail_sections(),
+            "deferred_uploads": r.deferred_uploads(),
+        })
+    });
     let json = serde_json::json!({
         "state": mode,
         "title": game.title.is_some(),
@@ -16493,6 +16517,8 @@ fn update_web_status(game: &Game<'_>) {
         "chunks": game.world.chunks.len(),
         "generated": game.streaming.generated_total,
         "meshed_sections": game.streaming.meshed_total,
+        "pending_uploads": game.pending_uploads.len(),
+        "renderer": renderer,
         "player": pos,
     })
     .to_string();
