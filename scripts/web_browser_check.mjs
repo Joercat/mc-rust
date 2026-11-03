@@ -409,9 +409,16 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
   // synthetic canvas events and chat teleports all failed to move it.
   await page.evaluate(() => window.__horizonDebugMove(240));
   let after = before;
-  const crossingUntil = Date.now() + 26_000;
+  const crossingUntil = Date.now() + 30_000;
+  let rearmed = 0;
   while (Date.now() < crossingUntil) {
     await new Promise((r) => setTimeout(r, 1500));
+    // Keep failing placements while new columns arrive, so the retry path is
+    // exercised by the crossing itself instead of passing with nothing to do.
+    if (forceFailures > 0 && rearmed < 8) {
+      await page.evaluate((n) => window.__horizonForceUploads(n), 20);
+      rearmed += 1;
+    }
     after = await status(page);
     if ((after.generated || 0) - (before.generated || 0) >= 24) break;
   }
@@ -438,7 +445,8 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
       `${before.chunks} -> ${after.chunks} resident, worst main-thread task ${task.ms} ms, ` +
       `worst frame gap ${worstGap} ms (${how} keys), forced ${forceFailures} upload failure(s), ` +
       `deferred ${renderer.deferred_uploads || 0}, pending ${drained.pending_uploads || 0}, ` +
-      `sections ${renderer.sections || 0} drawn ${renderer.detail_sections || 0}`,
+      `sections ${renderer.sections || 0} drawn ${renderer.detail_sections || 0}, ` +
+      `draws ${renderer.draws || 0}, vertices ${renderer.vertices || 0}, pixels ${renderer.pixels || 0}`,
   );
   return {
     ms: Math.round(to - from),

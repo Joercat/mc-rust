@@ -1143,8 +1143,18 @@ impl Streaming {
                             apply_relighting(chunk, sections, &mut changed);
                         }
                         // Saved unlit (at the edge of what was loaded), or its light
-                        // changed: saved again.
-                        if (first && !chunk.light_loaded) || !changed.is_empty() {
+                        // changed: saved again. A page skips the light-only case:
+                        // every column it loads is lit, and each of those saves
+                        // encodes and compresses a chunk inside a frame (that was
+                        // 50-63 ms of the idle frame). Light is recomputed when
+                        // the column loads again.
+                        let relit = (first && !chunk.light_loaded) || !changed.is_empty();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if relit {
+                            world.modified.insert((x, z));
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        if first && !chunk.light_loaded {
                             world.modified.insert((x, z));
                         }
                         chunk.lit = true;
