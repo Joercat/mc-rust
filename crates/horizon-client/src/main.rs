@@ -161,6 +161,13 @@ mod web_entry {
         crate::game::request_web_force_uploads(n);
     }
 
+    /// The frame budget adaptive render scaling aims for, in ms (0: 30 fps).
+    #[wasm_bindgen]
+    pub fn horizon_web_frame_budget(ms: f32) {
+        install_hooks();
+        crate::game::request_web_frame_budget(ms);
+    }
+
     /// Ask the game to save the world (the page is hidden or closing).
     #[wasm_bindgen]
     pub fn horizon_web_request_save() {

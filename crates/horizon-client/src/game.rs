@@ -1592,6 +1592,12 @@ struct Game<'a> {
     /// Controllers (Horizon's own).
     pad: pad::Pads,
     frames: u64,
+    /// The smoothed frame time and the frames since the render scale last
+    /// moved: adaptive scaling's inputs.
+    frame_ms_ema: f32,
+    scale_frames: u32,
+    /// A frame budget a test sets in ms (0: the default 30 fps).
+    frame_budget_override: f32,
     /// `item_level` for one frame, game time, day time and dimension.
     item_level_cache: std::cell::RefCell<
         Option<(
@@ -8305,6 +8311,60 @@ impl Game<'_> {
     pub(super) fn camera_orientation(&self) -> glam::Quat {
         camera_rotation(self.camera_type, self.yaw, self.pitch)
     }
+    /// Holds the frame budget by moving the world's resolution scale: down
+    /// while frames run long, back up while they have room, at most one step per
+    /// window of frames and with hysteresis so it settles instead of
+    /// oscillating. The scale the settings ask for is the ceiling,
+    /// [`horizon_client::gfx::MIN_RENDER_SCALE`] the floor.
+    fn adapt_render_scale(&mut self, frame_ms: f32) {
+        const STEP: f32 = 0.05;
+        const WINDOW: u32 = 20;
+        const DOWN_AT: f32 = 1.15;
+        const UP_AT: f32 = 0.85;
+        self.frame_budget_override = current_web_frame_budget();
+        // Menus are not playing frames, and a paused game should not be tuned.
+        if self.title.is_some() || self.screen != Screen::Playing || self.pause {
+            self.frame_ms_ema = 0.0;
+            self.scale_frames = 0;
+            return;
+        }
+        let budget = if self.frame_budget_override > 0.0 {
+            self.frame_budget_override
+        } else {
+            1000.0 / 30.0
+        };
+        // One loading spike must not move the scale: the average carries it.
+        self.frame_ms_ema = if self.frame_ms_ema == 0.0 {
+            frame_ms
+        } else {
+            self.frame_ms_ema * 0.9 + frame_ms * 0.1
+        };
+        self.scale_frames += 1;
+        if self.scale_frames < WINDOW {
+            return;
+        }
+        self.scale_frames = 0;
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        let now = r.render_scale();
+        let cap = r.render_scale_cap();
+        let slow = self.frame_ms_ema > budget * DOWN_AT;
+        let roomy = self.frame_ms_ema < budget * UP_AT;
+        let next = if slow && now > horizon_client::gfx::MIN_RENDER_SCALE {
+            (now - STEP).max(horizon_client::gfx::MIN_RENDER_SCALE).min(cap)
+        } else if roomy && now < cap {
+            (now + STEP).min(cap)
+        } else {
+            now
+        };
+        if r.set_render_scale(next) {
+            log::info!(
+                "Horizon: render scale {now:.2} -> {next:.2} ({:.0} ms frames, {budget:.0} ms budget)",
+                self.frame_ms_ema
+            );
+        }
+    }
     /// ItemEntityRenderer: items bob and spin; blocks render as small cubes.
     fn entity_geometry(
         &mut self,
@@ -14333,6 +14393,7 @@ impl ApplicationHandler for Game<'_> {
                         // slow and what the frame was doing, so the next report
                         // of "it stutters" comes with its cause.
                         let frame_ms = elapsed.as_secs_f32() * 1000.0;
+                        self.adapt_render_scale(frame_ms);
                         if frame_ms > 100.0 {
                             let screen = match self.screen {
                                 Screen::Playing => "playing",
@@ -14686,6 +14747,9 @@ impl<'a> Game<'a> {
             last_input: now,
             pad: Default::default(),
             frames: 0,
+            frame_ms_ema: 0.0,
+            scale_frames: 0,
+            frame_budget_override: 0.0,
             item_level_cache: Default::default(),
             world_frames: 0,
             fps: 0.0,
@@ -16459,6 +16523,21 @@ static WEB_SAVE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// (the browser harness sets it; nothing in the game does).
 static WEB_FORCE_UPLOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// The frame budget adaptive scaling aims for, in tenths of a millisecond (0:
+/// the default 30 fps). A browser harness sets it to watch the scale move.
+static WEB_FRAME_BUDGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn request_web_frame_budget(ms: f32) {
+    WEB_FRAME_BUDGET.store(
+        (ms.max(0.0) * 10.0) as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn current_web_frame_budget() -> f32 {
+    WEB_FRAME_BUDGET.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0
+}
+
 /// Blocks the next frames step the player by (the harness cannot deliver
 /// movement keys headless, so it drives the player from inside the loop).
 static WEB_DEBUG_MOVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -16531,6 +16610,11 @@ fn update_web_status(game: &Game<'_>) {
             "draws": r.draw_calls(),
             "vertices": r.terrain_vertices(),
             "pixels": r.target_pixels(),
+            "screen_pixels": r.screen_pixels(),
+            "scale": r.render_scale(),
+            "scale_cap": r.render_scale_cap(),
+            "scale_steps": r.render_scale_steps(),
+            "budget": game.frame_budget_override,
         })
     });
     let json = serde_json::json!({

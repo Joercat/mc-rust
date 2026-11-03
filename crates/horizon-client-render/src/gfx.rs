@@ -106,6 +106,10 @@ mod view;
 mod wgsl_prefix;
 mod world_post;
 
+/// The lowest scale adaptive scaling goes to: the world never renders below a
+/// quarter of the window's size, so the picture stays usable.
+pub const MIN_RENDER_SCALE: f32 = 0.25;
+
 /// A column whose every section has its mesh (`Renderer::lod_detail_columns`).
 const COMPLETE_COLUMN: u32 = (1 << (crate::chunk::HEIGHT / 16)) - 1;
 /// A section's instance: its camera-relative origin and, in `w`, the step of
@@ -565,6 +569,13 @@ pub struct Renderer {
     occlusion: occlusion::Occlusion,
     /// Resolution scale, FXAA and TAA (Horizon settings).
     world_post: world_post::Post,
+    /// The resolution scale the settings asked for: adaptive scaling stays at or below it.
+    render_scale_cap: f32,
+    /// The scale the world renders at now, and how many times adaptive scaling moved it.
+    render_scale: f32,
+    render_scale_steps: u32,
+    /// Terrain draw calls a flat frame issued last frame, so the readout is not zero there.
+    flat_draw_calls: usize,
     /// HDR output (Horizon setting): `Some` while the swapchain is HDR.
     hdr: Option<hdr::Hdr>,
     /// The HDR output the window's surface can present.
@@ -2827,6 +2838,10 @@ impl Renderer {
             uploads_deferred: 0,
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             world_post,
+            render_scale_cap: 1.0,
+            render_scale: 1.0,
+            render_scale_steps: 0,
+            flat_draw_calls: 0,
             hdr: None,
             hdr_output,
             hdr_marker: None,
@@ -3082,7 +3097,11 @@ impl Renderer {
 
     /// Section draws submitted last frame.
     pub fn draw_calls(&self) -> usize {
-        self.draws.len()
+        if self.flat_draw_calls > 0 {
+            self.flat_draw_calls
+        } else {
+            self.draws.len()
+        }
     }
     /// Terrain vertices in the sections placed right now.
     pub fn terrain_vertices(&self) -> u64 {
@@ -3091,8 +3110,16 @@ impl Renderer {
             .map(|s| u64::from(s.solid + s.translucent) * 4)
             .sum()
     }
-    /// Pixels each frame renders to.
+    /// Pixels the world renders each frame: the scaled target's, or the
+    /// window's while it draws straight to the screen.
     pub fn target_pixels(&self) -> u64 {
+        self.world_post.size().map_or_else(
+            || self.screen_pixels(),
+            |s| u64::from(s[0]) * u64::from(s[1]),
+        )
+    }
+    /// Pixels the window presents each frame.
+    pub fn screen_pixels(&self) -> u64 {
         u64::from(self.config.width) * u64::from(self.config.height)
     }
     /// Sections placed on the GPU.
@@ -3544,10 +3571,43 @@ impl Renderer {
     /// `upscale`: output pixels per rendered pixel, for TAA to rebuild (1: native).
     pub fn set_world_post(&mut self, scale: f32, antialias: bool, taa: bool, upscale: f32) {
         let taa = taa && self.world_post.supports_taa();
-        self.world_post.scale = scale.clamp(0.25, 2.0);
+        // The setting is a ceiling, not the scale itself: adaptive scaling may
+        // have moved the world below it, and applying settings must keep that
+        // instead of jumping back to a scale the device could not hold.
+        self.render_scale_cap = scale.clamp(MIN_RENDER_SCALE, 2.0);
+        self.render_scale = self
+            .render_scale
+            .clamp(MIN_RENDER_SCALE, self.render_scale_cap);
+        self.world_post.scale = self.render_scale;
         self.world_post.antialias = antialias && !taa;
         self.world_post.taa = taa;
         self.world_post.upscale = if taa { upscale.clamp(1.0, 4.0) } else { 1.0 };
+    }
+    /// The world's resolution scale right now, and the ceiling the settings set.
+    pub fn render_scale(&self) -> f32 {
+        self.render_scale
+    }
+    /// The highest scale the settings allow (`resolution_scale`).
+    pub fn render_scale_cap(&self) -> f32 {
+        self.render_scale_cap
+    }
+    /// How many times adaptive scaling has moved the world's scale.
+    pub fn render_scale_steps(&self) -> u32 {
+        self.render_scale_steps
+    }
+    /// Moves the world's resolution scale, never above the configured one nor
+    /// below [`MIN_RENDER_SCALE`]. Returns whether it moved: the target is
+    /// rebuilt at the new size on the next frame, so the picture covers the
+    /// window (a scaled target is copied to the whole screen, never letterboxed).
+    pub fn set_render_scale(&mut self, scale: f32) -> bool {
+        let scale = scale.clamp(MIN_RENDER_SCALE, self.render_scale_cap);
+        if (scale - self.render_scale).abs() < 0.001 {
+            return false;
+        }
+        self.render_scale = scale;
+        self.world_post.scale = scale;
+        self.render_scale_steps = self.render_scale_steps.saturating_add(1);
+        true
     }
     /// Runs `post` over the world from now on (`None`: no pack), for the dimension `dimension`;
     /// `block_ids` gives each block sprite layer's `mc_Entity` (id, fluid) pair.
@@ -4778,7 +4838,13 @@ impl Renderer {
             _ => false,
         };
         if flat_frame {
-            self.section_draw_calls = self.flat.as_ref().map_or(0, |f| f.shadow_calls[0]);
+            let flat = self.flat.as_ref();
+            self.section_draw_calls = flat.map_or(0, |f| f.shadow_calls[0]);
+            // The draws the flat path actually issues. Without this the status
+            // readout reported zero draws on exactly the devices that use it.
+            self.flat_draw_calls = flat.map_or(0, |f| {
+                f.solid_calls + f.translucent_calls().len() + f.shadow_calls[0] + f.shadow_calls[1]
+            });
         } else if self.multi_draw && !self.draws.is_empty() {
             if self.draws.len() as u64 > self.indirect_capacity {
                 self.indirect_capacity = (self.draws.len() as u64).next_power_of_two();
@@ -4795,6 +4861,9 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&self.draws),
             );
+        }
+        if !flat_frame {
+            self.flat_draw_calls = 0;
         }
         let view_target = target_texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(self.config.format.remove_srgb_suffix()),

@@ -472,6 +472,7 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
     sections: renderer.sections || 0,
     detail: renderer.detail_sections || 0,
     forced: forceFailures,
+    draws: renderer.draws || 0,
   };
 }
 
@@ -573,6 +574,44 @@ async function runSession({ label, stripIsolation, reload }) {
     `  [${label}] idle 8 s: ${idle.n} frame(s), median ${idle.median} ms, p90 ${idle.p90} ms, ` +
       `worst ${idle.worst} ms${idle.n >= 20 && idle.median > 51 ? " (above the 51 ms goal)" : ""}`,
   );
+  const scaleOf = (state) => ((state.renderer || {}).scale ?? 0);
+  const idleStatus = await status(page);
+  console.log(
+    `  [${label}] scale after idle: ${scaleOf(idleStatus).toFixed(2)} ` +
+      `(ceiling ${((idleStatus.renderer || {}).scale_cap || 0).toFixed(2)}, ` +
+      `moved ${(idleStatus.renderer || {}).scale_steps || 0} time(s))`,
+  );
+  // Both directions, through the game's own controller: a budget no frame can
+  // miss lets the scale climb back to the configured ceiling, and one no frame
+  // can meet drives it to the floor.
+  await page.evaluate(() => window.__horizonFrameBudget(400));
+  await new Promise((r) => setTimeout(r, 7000));
+  const recovered = await status(page);
+  await page.evaluate(() => window.__horizonFrameBudget(2));
+  await new Promise((r) => setTimeout(r, 7000));
+  const dropped = await status(page);
+  await page.evaluate(() => window.__horizonFrameBudget(0));
+  console.log(
+    `  [${label}] scale moved: recovered ${scaleOf(recovered).toFixed(2)} ` +
+      `(ceiling ${((recovered.renderer || {}).scale_cap || 0).toFixed(2)}), ` +
+      `dropped ${scaleOf(dropped).toFixed(2)}, pixels ${(dropped.renderer || {}).pixels || 0} ` +
+      `of ${(dropped.renderer || {}).screen_pixels || 0}`,
+  );
+  if (!(scaleOf(recovered) > scaleOf(dropped))) {
+    fail(
+      `${label}: the render scale never climbed back after the frames got fast ` +
+        `(${scaleOf(recovered).toFixed(2)} recovered, ${scaleOf(dropped).toFixed(2)} under load)`,
+    );
+  }
+  if (!(scaleOf(recovered) >= ((recovered.renderer || {}).scale_cap || 0) - 0.001)) {
+    fail(
+      `${label}: the render scale stopped at ${scaleOf(recovered).toFixed(2)} below its ` +
+        `ceiling ${((recovered.renderer || {}).scale_cap || 0).toFixed(2)} with no load`,
+    );
+  }
+  if (scaleOf(dropped) > 0.5) {
+    fail(`${label}: a 2 ms budget only reached a scale of ${scaleOf(dropped).toFixed(2)}`);
+  }
   const phases = await page.evaluate(() => window.__phases);
   console.log(`  [${label}] phases: ${phases.map((p) => `${p.at}ms ${p.text}`).join(" | ")}`);
   const longTasks = await page.evaluate(() => window.__longtasks);
@@ -609,6 +648,9 @@ async function runSession({ label, stripIsolation, reload }) {
   if (travel.pending > 0) fail(`${label}: ${travel.pending} section upload(s) never found room after a load burst`);
   if (travel.detail < travel.sections) {
     fail(`${label}: ${travel.sections - travel.detail} section(s) placed but not drawn after a load burst`);
+  }
+  if (!(travel.draws > 0)) {
+    fail(`${label}: the renderer reported no terrain draws (${travel.draws})`);
   }
   if (travel.forced > 0 && travel.deferred === 0) {
     fail(`${label}: the forced upload failures never reached the retry path`);

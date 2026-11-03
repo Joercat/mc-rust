@@ -66,7 +66,7 @@ let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.40";
+const BUILD = "2026-11-01.41";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -462,6 +462,15 @@ async function boot() {
       wasm.horizon_web_debug_move(steps >>> 0);
     } catch (e) {
       /* an older engine: nothing to move */
+    }
+  };
+  // The adaptive render scale's target frame budget, for the harness: it moves
+  // the scale the way a slow device does, without needing a slow device.
+  window.__horizonFrameBudget = (ms) => {
+    try {
+      wasm.horizon_web_frame_budget(ms);
+    } catch (e) {
+      /* an older engine: no adaptive scale */
     }
   };
   window.__horizonForceUploads = (n) => {
