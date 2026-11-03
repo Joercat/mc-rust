@@ -51,7 +51,7 @@ function fail(message) {
 // animation frames are what "the game froze for a second" actually is.
 function instrument() {
   window.__longtasks = [];
-  window.__frames = { last: 0, worst: 0 };
+  window.__frames = { last: 0, worst: 0, gaps: [] };
   try {
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
@@ -63,7 +63,11 @@ function instrument() {
   }
   const tick = (now) => {
     const previous = window.__frames.last;
-    if (previous) window.__frames.worst = Math.max(window.__frames.worst, now - previous);
+    if (previous) {
+      const gapMs = now - previous;
+      window.__frames.worst = Math.max(window.__frames.worst, gapMs);
+      if (window.__frames.gaps.length < 4000) window.__frames.gaps.push(gapMs);
+    }
     window.__frames.last = now;
     requestAnimationFrame(tick);
   };
@@ -409,15 +413,21 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
   // synthetic canvas events and chat teleports all failed to move it.
   await page.evaluate(() => window.__horizonDebugMove(240));
   let after = before;
+  let lastSections = (before.renderer || {}).sections || 0;
   const crossingUntil = Date.now() + 30_000;
   let rearmed = 0;
   while (Date.now() < crossingUntil) {
     await new Promise((r) => setTimeout(r, 1500));
-    // Keep failing placements while new columns arrive, so the retry path is
-    // exercised by the crossing itself instead of passing with nothing to do.
-    if (forceFailures > 0 && rearmed < 8) {
+    // Keep failing placements while sections are actually arriving, so the
+    // retry path is exercised by the crossing itself instead of passing with
+    // nothing to do: a crossing that drops columns places nothing to fail.
+    const placing =
+      ((after.renderer || {}).sections || 0) > lastSections ||
+      (after.pending_uploads || 0) > 0;
+    if (forceFailures > 0 && rearmed < 8 && placing) {
       await page.evaluate((n) => window.__horizonForceUploads(n), 20);
       rearmed += 1;
+      lastSections = (after.renderer || {}).sections || 0;
     }
     after = await status(page);
     if ((after.generated || 0) - (before.generated || 0) >= 24) break;
@@ -443,7 +453,7 @@ async function runForward(page, label, { forceFailures = 0 } = {}) {
   console.log(
     `  [${label}] run: moved ${moved.toFixed(1)} blocks, ${generated} chunk(s) generated, ` +
       `${before.chunks} -> ${after.chunks} resident, worst main-thread task ${task.ms} ms, ` +
-      `worst frame gap ${worstGap} ms (${how} keys), forced ${forceFailures} upload failure(s), ` +
+      `worst frame gap ${worstGap} ms (${how} keys), re-armed ${rearmed}, forced ${forceFailures} upload failure(s), ` +
       `deferred ${renderer.deferred_uploads || 0}, pending ${drained.pending_uploads || 0}, ` +
       `sections ${renderer.sections || 0} drawn ${renderer.detail_sections || 0}, ` +
       `draws ${renderer.draws || 0}, vertices ${renderer.vertices || 0}, pixels ${renderer.pixels || 0}`,
@@ -549,6 +559,20 @@ async function runSession({ label, stripIsolation, reload }) {
       `${((autosaved.bytes || 0) / 1024).toFixed(0)} KiB`,
   );
 
+  // Idle: the player stands still and nothing streams. What a page costs when
+  // it is not being asked to do anything is what a player calls stutter.
+  const idle = await page.evaluate(async () => {
+    window.__frames.gaps = [];
+    await new Promise((r) => setTimeout(r, 8000));
+    const g = window.__frames.gaps.slice().sort((a, b) => a - b);
+    if (g.length === 0) return { n: 0 };
+    const at = (q) => Math.round(g[Math.min(g.length - 1, Math.floor(q * g.length))]);
+    return { n: g.length, median: at(0.5), p90: at(0.9), worst: Math.round(g[g.length - 1]) };
+  });
+  console.log(
+    `  [${label}] idle 8 s: ${idle.n} frame(s), median ${idle.median} ms, p90 ${idle.p90} ms, ` +
+      `worst ${idle.worst} ms${idle.n >= 20 && idle.median > 51 ? " (above the 51 ms goal)" : ""}`,
+  );
   const phases = await page.evaluate(() => window.__phases);
   console.log(`  [${label}] phases: ${phases.map((p) => `${p.at}ms ${p.text}`).join(" | ")}`);
   const longTasks = await page.evaluate(() => window.__longtasks);
