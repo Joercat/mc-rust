@@ -155,6 +155,14 @@ mod web_entry {
         crate::game::request_web_debug_move(steps);
     }
 
+    /// Pin the next world's spawn column (`?spawn=x,y,z`): a testing hook that
+    /// makes a walked route repeatable.
+    #[wasm_bindgen]
+    pub fn horizon_web_pin_spawn(x: i32, y: i32, z: i32) {
+        install_hooks();
+        crate::game::request_web_pin_spawn(x, y, z);
+    }
+
     #[wasm_bindgen]
     pub fn horizon_web_force_upload_failures(n: u32) {
         install_hooks();
@@ -166,6 +174,15 @@ mod web_entry {
     pub fn horizon_web_frame_budget(ms: f32) {
         install_hooks();
         crate::game::request_web_frame_budget(ms);
+    }
+
+    /// Simulated frame time proportional to the world's rendered pixels, in
+    /// milliseconds at full resolution (0: off): the browser harness's
+    /// stand-in for a GPU-bound device on a machine that has no GPU.
+    #[wasm_bindgen]
+    pub fn horizon_web_pixel_cost(ms: f32) {
+        install_hooks();
+        crate::game::request_web_pixel_cost(ms);
     }
 
     /// Ask the game to save the world (the page is hidden or closing).

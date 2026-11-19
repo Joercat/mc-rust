@@ -3,6 +3,9 @@
 //! tick and turns what the guests do into gameplay. A world that is not open
 //! costs one `Option` check per tick.
 use super::{Game, shield::OFFHAND_SLOT};
+
+/// The host events a tick did not reach (`Game::lan_pending`).
+pub(super) type PendingEvents = Vec<HostEvent>;
 use horizon_client::{
     Result,
     items::ItemStack,
@@ -1518,6 +1521,9 @@ impl Game<'_> {
         let Some(mut host) = self.lan.take() else {
             return;
         };
+        let head = horizon_core::time::Instant::now();
+        let mut tail: Option<horizon_core::time::Instant> = None;
+        let mut join: Option<horizon_core::time::Instant> = None;
         // What the tick sends a guest goes to its connection at the end.
         let holding = lan::Holding::start();
         // The host's own commands' (and command blocks') players moving
@@ -1552,10 +1558,12 @@ impl Game<'_> {
                     .iter()
                     .filter_map(|g| Some((g.vehicle?, g.entity_id)))
                     .collect();
-                self.lan_riding(host_entity, &guests, &mut host.hub.riding);
-                self.lan_entities(host_entity, &host.mob_players, &mut host.hub, &mut states);
-                self.lan_hook_states(host_entity, &host.play, &host.hub, &mut states);
-                self.lan_entity_uuids(&mut states);
+                horizon_client::spans::time("lan_assign", || {
+                    self.lan_riding(host_entity, &guests, &mut host.hub.riding);
+                    self.lan_entities(host_entity, &host.mob_players, &mut host.hub, &mut states);
+                    self.lan_hook_states(host_entity, &host.play, &host.hub, &mut states);
+                    self.lan_entity_uuids(&mut states);
+                });
             } else {
                 states.clear();
             }
@@ -1584,6 +1592,8 @@ impl Game<'_> {
             for (id, event, at) in gone {
                 host.hub.entity_event(id, event, at);
             }
+            horizon_client::spans::add("lan_head", head.elapsed());
+            tail = Some(horizon_core::time::Instant::now());
             let spawn = self.spawn.map_or([0.5, 80.0, 0.5], |s| [s.x, s.y, s.z]);
             let events = {
                 let clock_rate = self.network_clock_rate();
@@ -1619,11 +1629,11 @@ impl Game<'_> {
                 // (`tick_server`): the network is read once, before the first.
                 let pass = self.level_pass;
                 let mut events = if pass.first {
-                    host.hub.poll(&mut ctx)
+                    horizon_client::spans::time("lan_poll", || host.hub.poll(&mut ctx))
                 } else {
                     Vec::new()
                 };
-                events.extend(host.hub.tick_level(&mut ctx));
+                events.extend(horizon_client::spans::time("lan_level", || host.hub.tick_level(&mut ctx)));
                 if pass.last {
                     host.hub.end_tick();
                 }
@@ -1635,7 +1645,28 @@ impl Game<'_> {
                 host.host_mode = state.game_mode;
                 host.hub.set_host_game_mode(state.uuid, state.game_mode);
             }
-            for event in events {
+            join = Some(horizon_core::time::Instant::now());
+            let events_started = horizon_core::time::Instant::now();
+            // The events of a tick that caught a join or a wave are a burst
+            // (12.9 ms of an open's tick). They run in order for at most this
+            // long; the event that does not fit and those after it go to the
+            // front of the queue for the next tick.
+            const EVENTS_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+            let deadline = events_started + EVENTS_BUDGET;
+            let mut queue = std::mem::take(&mut self.lan_pending);
+            queue.extend(events);
+            let mut iter = queue.into_iter();
+            let mut n = 0usize;
+            loop {
+                let Some(event) = iter.next() else {
+                    break;
+                };
+                if n > 0 && horizon_core::time::Instant::now() >= deadline {
+                    self.lan_pending.push(event);
+                    self.lan_pending.extend(iter);
+                    break;
+                }
+                n += 1;
                 match event {
                     event @ (HostEvent::Chat { .. } | HostEvent::Warn(_) | HostEvent::Error(_)) => {
                         self.lan_log_event(event);
@@ -1738,6 +1769,7 @@ impl Game<'_> {
                     }
                 }
             }
+            horizon_client::spans::add("lan_events", events_started.elapsed());
             host.states = states;
         }
         if !host.quiet.is_empty() {
@@ -1757,11 +1789,15 @@ impl Game<'_> {
         self.lan_swings(&mut host);
         self.lan_update_streaming(&host);
         self.lan_update_models(&mut host);
-        self.lan_update_waypoints(&mut host, state.as_ref());
-        self.lan_sync_scoreboard(&mut host);
-        self.lan_sync_border(&mut host);
-        drop(holding);
-        lan::flush_all(host.hub.guests.iter().map(|g| &g.sender));
+        horizon_client::spans::time("lan_sync", || {
+            self.lan_update_waypoints(&mut host, state.as_ref());
+            self.lan_sync_scoreboard(&mut host);
+            self.lan_sync_border(&mut host);
+        });
+        horizon_client::spans::time("lan_flush", || {
+            drop(holding);
+            lan::flush_all(host.hub.guests.iter().map(|g| &g.sender));
+        });
         self.lan = Some(host);
         // A blast from a guest's attack, and a mace's wind burst.
         self.flush_lan_explosions();
@@ -1772,6 +1808,12 @@ impl Game<'_> {
         self.flush_hook_pulls();
         // Particles a guest's turn sent (sweep attack, damage indicator, a hook's splashes).
         self.flush_lan_particles();
+        if let Some(join) = join {
+            horizon_client::spans::add("lan_join", join.elapsed());
+        }
+        if let Some(tail) = tail {
+            horizon_client::spans::add("lan_tail", tail.elapsed());
+        }
     }
 
     fn lan_guest_joined(
@@ -1782,6 +1824,7 @@ impl Game<'_> {
         entities: &[EntityState],
         spawn: [f64; 3],
     ) {
+        let t0 = horizon_core::time::Instant::now();
         let default_mode = host.hub.config.default_game_mode;
         let force = host.hub.config.force_game_mode;
         let root = self.world_root.clone();
@@ -1827,6 +1870,8 @@ impl Game<'_> {
         if !elsewhere {
             g.dimension = in_place;
         }
+        horizon_client::spans::add("join_data", t0.elapsed());
+        let t1 = horizon_core::time::Instant::now();
         self.load_guest_records(host, conn);
         let mut theirs = States::default();
         let entities = if elsewhere {
@@ -1858,7 +1903,10 @@ impl Game<'_> {
             collision: Some(self.collision),
             border: &self.border,
         };
+        horizon_client::spans::add("join_setup", t1.elapsed());
+        let t2 = horizon_core::time::Instant::now();
         host.hub.place_new_player(conn, &mut ctx);
+        horizon_client::spans::add("join_place", t2.elapsed());
         if elsewhere && let Err(e) = self.enter_level(Some(host), back) {
             log::error!("could not reopen {}: {e}", back.id());
         }

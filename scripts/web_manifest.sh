@@ -22,6 +22,21 @@ if [ ! -s public/horizon-client_bg.wasm ]; then
   echo "web_manifest: public/horizon-client_bg.wasm is missing" >&2
   exit 1
 fi
+# The page's own script is the one file a host or proxy can keep under an
+# unchanged URL, and a stale `app.js` runs an old shell against a new engine:
+# it carries the build stamp in its URL so the two can never drift apart.
+# The page's own script is the one file a host or proxy can keep under an
+# unchanged URL, and a stale `app.js` runs an old shell against a new engine:
+# whatever the tag names, it has to carry the current build stamp.
+script_tag="$(grep -o 'src="\./[^"]*\.js?v=[^"]*"' public/index.html | head -1)"
+case "$script_tag" in
+  *"?v=$build\"") ;;
+  *)
+    echo "web_manifest: public/index.html loads ${script_tag:-no script} without ?v=$build" >&2
+    echo "               (bump the script tag with BUILD in public/app.js)" >&2
+    exit 1
+    ;;
+esac
 
 hash_of() {
   if command -v sha256sum >/dev/null 2>&1; then

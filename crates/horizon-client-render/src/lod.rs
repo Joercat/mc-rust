@@ -2109,13 +2109,13 @@ mod tests {
         // As a replan does (`update` only selects after a change).
         lod.reselect = true;
         let await_meshes = |lod: &mut Lod| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = horizon_core::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 let meshes = lod.update(camera, 0.0, 2, 64, None);
                 if !meshes.is_empty() {
                     return meshes;
                 }
-                assert!(std::time::Instant::now() < deadline, "mesh worker stalled");
+                assert!(horizon_core::time::Instant::now() < deadline, "mesh worker stalled");
                 horizon_core::sync::sleep(std::time::Duration::from_millis(1));
             }
         };
@@ -2157,14 +2157,14 @@ mod tests {
         lod.covered.insert((-1, -2));
         lod.reselect = true;
         lod.replanned = true;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = horizon_core::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             lod.update(camera, 0., 2, 64, None);
             if !lod.meshing && lod.active.is_empty() {
                 break;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                horizon_core::time::Instant::now() < deadline,
                 "covered normal chunk remained an active LOD mask"
             );
             horizon_core::sync::sleep(std::time::Duration::from_millis(1));
@@ -2271,7 +2271,7 @@ mod tests {
         lod.detail_masks.clear();
         lod.covered = [(0, 0)].into_iter().collect();
         lod.detail_request_pending = false;
-        lod.detail_request_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        lod.detail_request_at = horizon_core::time::Instant::now() - std::time::Duration::from_secs(1);
         lod.request_detail([0, 0]);
         let Some(Job::RequestDetail { chunks, .. }) = horizon_core::sync::lock(&lod.shared.jobs).pop_front()
         else {

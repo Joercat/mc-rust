@@ -62,11 +62,70 @@ function noteParkedThread(err) {
 // sharing one memory (`threads.js`), and the single-threaded one every browser
 // can run. The threaded one needs cross-origin isolation for shared memory.
 let wasm = null;
+
+// The status readout and the harness's knobs live at module scope, not in
+// `boot()`'s tail: a page whose boot stalls half way must still be observable
+// from outside, and a readout that throws must say so instead of leaving the
+// window empty for a whole session.
+let statusTimer = null;
+function readStatus() {
+  if (!wasm || typeof wasm.horizon_web_status !== "function") return;
+  try {
+    window.__horizon_status = wasm.horizon_web_status();
+    window.__horizon_status_error = null;
+  } catch (e) {
+    // Keeping the last readout is right for a transient failure; a readout
+    // that throws every second has to name its reason, once per change.
+    const why = String((e && e.stack) || e);
+    if (why !== window.__horizon_status_error) {
+      window.__horizon_status_error = why;
+      console.warn("[horizon] status readout failed", e);
+    }
+  }
+}
+window.__horizonStatus = readStatus;
+statusTimer = setInterval(readStatus, 1000);
+// The harness's arena-full test: the next n section placements fail, and the
+// section stays drawn from its old mesh while the new one waits.
+window.__horizonDebugMove = (steps) => {
+  try {
+    wasm.horizon_web_debug_move(steps >>> 0);
+  } catch (e) {
+    /* an older engine: nothing to move */
+  }
+};
+// The adaptive render scale's target frame budget, for the harness: it moves
+// the scale the way a slow device does, without needing a slow device.
+window.__horizonFrameBudget = (ms) => {
+  try {
+    wasm.horizon_web_frame_budget(ms);
+  } catch (e) {
+    /* an older engine: no adaptive scale */
+  }
+};
+// A harness's stand-in for a GPU-bound device: milliseconds of frame time that
+// scale with the world's rendered pixels, so the controller can be shown frames
+// that really do get faster at a smaller size on a machine with no GPU. Zero in
+// play (nothing in the game sets it).
+window.__horizonPixelCost = (ms) => {
+  try {
+    wasm.horizon_web_pixel_cost(ms);
+  } catch (e) {
+    /* an older engine: no simulated cost */
+  }
+};
+window.__horizonForceUploads = (n) => {
+  try {
+    wasm.horizon_web_force_upload_failures(n >>> 0);
+  } catch (e) {
+    /* an older engine: nothing to force */
+  }
+};
 let init = null;
 // Stamped into every engine URL: the modules are tens of megabytes and a host
 // or browser will happily keep one from an older build under the same path.
 // Bump this whenever `scripts/build_web.sh` publishes new engines.
-const BUILD = "2026-11-01.41";
+const BUILD = "2026-11-05.41";
 const withBuild = (path) => {
   const url = new URL(path, import.meta.url);
   url.searchParams.set("v", BUILD);
@@ -330,14 +389,70 @@ async function persist(db) {
   }
 }
 
+/// Points adaptive render scaling at this display's refresh rate. The frame
+/// budget is the interval the browser delivers to rAF (measured, because the
+/// platform exposes no refresh rate), and a budget of 0 means 60 fps.
+function setFrameBudget() {
+  const asked = Number(new URLSearchParams(window.location.search).get("fps"));
+  // `interval` is one frame of the display; the budget carries the headroom.
+  const apply = (interval) => {
+    const budget = Math.round(interval * HEADROOM * 10) / 10;
+    try {
+      wasm.horizon_web_frame_budget(budget);
+      say(
+        `display: ~${Math.round(1000 / interval)} Hz · frame budget ${budget.toFixed(1)} ms`,
+      );
+    } catch (error) {
+      /* an older engine: no adaptive scale to aim */
+    }
+  };
+  // A frame that keeps up lands exactly on the interval the display gives rAF,
+  // and the controller only climbs back when a frame is well inside its budget
+  // (0.85 of it), so a budget equal to the interval would never be met and the
+  // scale could only ever step down. The budget is the interval plus a quarter:
+  // 60 Hz aims at 20.8 ms, which a healthy 16.7 ms frame is comfortably inside.
+  const HEADROOM = 1.25;
+  if (Number.isFinite(asked) && asked > 0) {
+    apply(1000 / Math.min(asked, 360));
+    return;
+  }
+  // Sample a handful of frames and take the typical interval. A busy boot can
+  // deliver long ones, so the median (not the mean) is what identifies the
+  // panel's rate; a browser that cannot measure keeps the 60 fps default.
+  const samples = [];
+  const tick = (now) => {
+    samples.push(now);
+    if (samples.length < 9) requestAnimationFrame(tick);
+    else {
+      const gaps = samples.slice(1).map((t, i) => t - samples[i]).sort((a, b) => a - b);
+      const median = gaps[Math.floor(gaps.length / 2)];
+      const ms = Number.isFinite(median) && median > 0 ? Math.min(Math.max(median, 4), 40) : 1000 / 60;
+      apply(ms);
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
 /// Starts the threaded engine's workers before the game does: a streaming
 /// world takes them as its chunk workers. A failure leaves the game playable
 /// (it runs the jobs on the frame), so it is reported, not fatal.
 async function startEngineThreads(engine) {
   if (!engine.threaded || typeof wasm.horizon_web_thread_handles !== "function") return;
   const handles = wasm.horizon_web_thread_handles();
-  // One core left for the frame and the integrated server, as on the desktop.
-  const count = Math.max(1, Math.min((navigator.hardwareConcurrency || 4) - 1, 16));
+  // Two cores kept for the frame: the browser's renderer and the GPU driver
+  // work on the main thread, so the pool must not fill the machine or every
+  // chunk job lengthens a frame. The pool also holds the integrated server
+  // and the connection's reader, so its count is not all chunk workers.
+  // One core is left out so the frame thread keeps its own.
+  // One core is left out so the frame thread keeps its own: everything else
+  // feeds the pool (chunk generation, meshing, lighting, the integrated
+  // server, the connection reader). `?threads=N` overrides it for a harness.
+  const asked = Number(new URLSearchParams(window.location.search).get("threads"));
+  const cores = navigator.hardwareConcurrency || 4;
+  const count =
+    Number.isFinite(asked) && asked > 0
+      ? Math.min(Math.floor(asked), 32)
+      : Math.max(1, Math.min(cores - 1, 16));
   try {
     const workers = await startThreadPool({
       module: handles[0],
@@ -345,7 +460,7 @@ async function startEngineThreads(engine) {
       glueUrl: engine.glueUrl || withBuild(engine.glue).href,
       count,
     });
-    say(`worker threads: ${workers.length}`);
+    say(`worker threads: ${workers.length} of ${count} (${cores} cores)`);
   } catch (error) {
     say(`worker threads failed: ${error}`);
     console.warn("[horizon] worker threads failed", error);
@@ -375,11 +490,20 @@ async function boot() {
   );
   // A compiled module, not a URL: the bytes may have come from IndexedDB.
   await init({ module_or_path: await WebAssembly.compile(engineAsset.bytes) });
+  // The compiled module no longer needs the JS copy: 33 MB that would
+  // otherwise still be alive when the page is torn down.
+  engineAsset.bytes = null;
   const flavour = engine.threaded ? `threaded, build ${BUILD}` : `build ${BUILD}`;
   say(`wasm engine ready (${flavour})${engineAsset.cached ? " from the cache" : ""}`);
 
   phase("starting worker threads…", 0.04);
   await startEngineThreads(engine);
+
+  // The adaptive render scale aims for a frame time; on the web 30 fps (33 ms)
+  // was the old target, so a fast machine sat at half the resolution it could
+  // hold. Measure the display instead: the rAF interval it actually delivers,
+  // so 60 Hz aims at 16.7 ms and 120 Hz at 8.3 ms. `?fps=N` overrides.
+  setFrameBudget();
 
   phase("downloading resources…", 0.08);
   const pack = await cache.bytes("horizon-vfs.bin", (p) =>
@@ -394,6 +518,9 @@ async function boot() {
 
   phase("mounting resources…", 0.66);
   const mounted = wasm.horizon_web_mount_pack(pack.bytes);
+  // Mounted into the wasm heap; drop the JS copy (100 MB+) instead of holding
+  // it for the whole session, where it only makes teardown expensive.
+  pack.bytes = null;
   say(`mounted ${mounted} virtual files`);
 
   phase("restoring saved worlds…", 0.70);
@@ -409,6 +536,15 @@ async function boot() {
   const params = new URLSearchParams(window.location.search);
   const world = params.get("world");
   const creative = params.get("creative") !== "0";
+  // A pinned spawn column (`?spawn=x,y,z`), so a walked route can be replayed.
+  const spawn = (params.get("spawn") || "").split(",").map(Number);
+  if (spawn.length === 3 && spawn.every(Number.isFinite)) {
+    try {
+      wasm.horizon_web_pin_spawn(Math.floor(spawn[0]), Math.floor(spawn[1]), Math.floor(spawn[2]));
+    } catch (e) {
+      /* an older engine: the pin is ignored */
+    }
+  }
   await pickRenderer(params);
   pickQuality(params);
   await wasm.horizon_web_start("horizon-canvas", width, height, world, creative);
@@ -422,6 +558,8 @@ async function boot() {
   bootEl.classList.add("hidden");
   canvasEl.focus();
   running = true;
+  window.__horizon_boot_stage = "running";
+  window.__horizon_wasm_status_type = typeof (wasm && wasm.horizon_web_status);
 
   // Save what the game writes. `?persist=0` turns it off: the boot probes use
   // it to tell a storage stall from a renderer one. The autosave only writes
@@ -446,40 +584,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flush();
   });
-  // Kept for the boot probes and the console; the page draws no readout of its
-  // own, so nothing is written to the DOM here.
-  setInterval(() => {
-    try {
-      window.__horizon_status = wasm.horizon_web_status();
-    } catch (e) {
-      /* keep the last readout */
-    }
-  }, 1000);
-  // The harness's arena-full test: the next n section placements fail, and
-  // the section stays drawn from its old mesh while the new one waits.
-  window.__horizonDebugMove = (steps) => {
-    try {
-      wasm.horizon_web_debug_move(steps >>> 0);
-    } catch (e) {
-      /* an older engine: nothing to move */
-    }
-  };
-  // The adaptive render scale's target frame budget, for the harness: it moves
-  // the scale the way a slow device does, without needing a slow device.
-  window.__horizonFrameBudget = (ms) => {
-    try {
-      wasm.horizon_web_frame_budget(ms);
-    } catch (e) {
-      /* an older engine: no adaptive scale */
-    }
-  };
-  window.__horizonForceUploads = (n) => {
-    try {
-      wasm.horizon_web_force_upload_failures(n >>> 0);
-    } catch (e) {
-      /* an older engine: nothing to force */
-    }
-  };
+  window.__horizon_boot_stage = "boot-tail-done";
 }
 
 // The browser owns most function keys: F1 opens its help, F3 find, F5 reloads

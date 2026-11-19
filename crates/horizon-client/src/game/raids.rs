@@ -268,7 +268,7 @@ impl Game<'_> {
             .join("data/minecraft/raids.dat")
     }
     /// The raids of the player's dimension (the previous one saved first).
-    fn load_raids(&mut self) {
+    pub(super) fn load_raids(&mut self) {
         if self.raiding.loaded == Some(self.dim) {
             return;
         }
@@ -345,7 +345,7 @@ impl Game<'_> {
             }
         }
     }
-    fn gameplay_attributes(&mut self) -> std::sync::Arc<GameplayAttributes> {
+    pub(super) fn gameplay_attributes(&mut self) -> std::sync::Arc<GameplayAttributes> {
         if self.raiding.attributes.is_none() {
             self.raiding.attributes = Some(std::sync::Arc::new(GameplayAttributes::load(
                 &self.options.resources,

@@ -260,7 +260,9 @@ impl Mailbox {
         // there) and every thread of the single-threaded build, where std's
         // condvar does not wait at all: it panics with "condvar wait not
         // supported", which used to kill a page that is not isolated.
-        if !horizon_core::sync::may_block() {
+        // The timed wait takes its deadline from std's clock, which traps on
+        // wasm, so the page polls here whatever thread it is on.
+        if cfg!(target_arch = "wasm32") || !horizon_core::sync::may_block() {
             let deadline = horizon_core::time::Instant::now() + timeout;
             loop {
                 if let Some(done) = self.try_recv() {
@@ -285,6 +287,11 @@ pub struct Streaming {
     light_view: Arc<dyn Fn(&Proto) -> Option<Chunk> + Send + Sync>,
     threads: Vec<thread::JoinHandle<()>>,
     inline_step: Option<Box<dyn FnMut() -> bool + Send>>,
+    /// Workers this streamer asked for but could not claim when it was built
+    /// (the pool was fully handed out as the world opened), as the count
+    /// still wanted and a spawner. The queue is retried on the next update,
+    /// so the jobs wait for a worker instead of running on the frame.
+    pending_spawn: Option<(usize, Box<dyn FnMut() -> bool + Send>)>,
     /// How many jobs can run at once: OS threads, the page's Web Workers, or
     /// 1 while jobs run inline on the frame.
     workers: usize,
@@ -337,6 +344,12 @@ pub struct Streaming {
     pub forced: HashSet<(i32, i32)>,
     /// No work is scheduled while paused (title screen).
     pub paused: bool,
+    /// Frames are running long: start one generation or decoration job a
+    /// frame instead of the full batch, so worldgen does not take the core
+    /// the frame needs. Never zero, so the world still streams.
+    pub throttle: bool,
+    /// Generation and decoration jobs started by the update running now.
+    started_this_update: u32,
     /// The level loading screen is up: work goes ring by ring (`Ranges::rings`).
     pub loading: bool,
     /// Dimension flags: sky light, Nether face shading.
@@ -350,6 +363,9 @@ pub struct Streaming {
     pub cutout_leaves: bool,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
     light_tables: Arc<LightTables>,
+    /// Edits whose relight this update's budget did not reach, in the order
+    /// they were made: relit first, a batch at a time, on later updates.
+    pending_relight: Vec<(i32, i32, i32)>,
     /// Applied edits by sequence, replayed onto light jobs snapshotted before them.
     light_log: Vec<(u64, (i32, i32, i32))>,
     light_edit_sequence: u64,
@@ -656,34 +672,76 @@ impl Streaming {
                 .collect(),
             None,
             threads.max(1),
+            None,
         );
         #[cfg(target_arch = "wasm32")]
-        let (threads, inline_step, workers): (
+        let (threads, inline_step, workers, pending_spawn): (
             Vec<thread::JoinHandle<()>>,
             Option<Box<dyn FnMut() -> bool + Send>>,
             usize,
+            Option<(usize, Box<dyn FnMut() -> bool + Send>)>,
         ) = {
             // A threaded page hands the jobs to its Web Workers, one job at a
-            // time each, on other threads while the frame keeps drawing. A
-            // streamer that asked for one worker (the title screen's, a
-            // server's) stays inline: it would hold a whole page thread for a
-            // job at a time.
-            let pool = if threads > 1 {
-                horizon_threads::pool_size().min(threads)
+            // time each, on other threads while the frame keeps drawing. Two
+            // workers stay free for the hub connection and the reader, and a
+            // caller that asked for one (the title screen, an integrated
+            // server) may take up to two of the rest: a generation job run
+            // inline in a server's tick is the tick spike a player sees the
+            // moment they walk into chunks that are not loaded yet.
+            // The client's streamer takes its share of the pool, and only while
+            // the reservation (the server loop, the hub, the reader, LAN
+            // serving) stays free. A streamer that asked for one worker — the
+            // title screen's, an integrated server's — takes up to two of the
+            // slots the reservation kept for it: a generation job run inside a
+            // server tick is the tick spike a player sees walking into chunks
+            // that are not loaded yet, and two workers keep it off the tick.
+            let (want, reserved) = if threads > 1 {
+                (horizon_threads::pool_size().min(threads), true)
             } else {
-                0
+                (2, false)
             };
-            let mut started = 0;
-            while started < pool {
+            let mut spawn_one = {
                 let (generator, shared, light) =
                     (generator.clone(), shared.clone(), context.light.clone());
-                if !horizon_threads::spawn_detached(move || run_worker(generator, shared, light)) {
-                    break;
+                move || {
+                    let (generator, shared, light) =
+                        (generator.clone(), shared.clone(), light.clone());
+                    let job = move || run_worker(generator, shared, light);
+                    if reserved {
+                        horizon_threads::spawn_reserved_detached(job)
+                    } else {
+                        horizon_threads::spawn_earmarked_detached(job)
+                    }
                 }
+            };
+            let mut started = 0;
+            while started < want && spawn_one() {
                 started += 1;
             }
+            let pool = horizon_threads::pool_size();
+            // A page with a pool never runs a generation job on the frame: a
+            // streamer that found no free worker at load (the world opens
+            // while the server, the hub and the client's own streamer already
+            // hold theirs) keeps its claim and starts its workers on the next
+            // update instead. Only a page without a pool streams inline.
+            let deferred = started == 0 && pool > 0;
+            log::info!(
+                "Horizon: streaming: {started} worker(s) of {want} \
+                 (earmarked {}, pool {}, {}, {})",
+                !reserved,
+                pool,
+                if deferred { "deferred" } else { "now" },
+                std::any::type_name::<G>()
+            );
             if started > 0 {
-                (Vec::new(), None, started)
+                (Vec::new(), None, started, None)
+            } else if deferred {
+                (
+                    Vec::new(),
+                    None,
+                    0,
+                    Some((want, Box::new(spawn_one) as Box<dyn FnMut() -> bool + Send>)),
+                )
             } else {
                 let shared_cl = shared.clone();
                 let gen_cl = generator.clone();
@@ -709,6 +767,7 @@ impl Streaming {
                         true
                     })),
                     1,
+                    None,
                 )
             }
         };
@@ -722,6 +781,7 @@ impl Streaming {
             threads,
             inline_step,
             workers,
+            pending_spawn,
             order: 0,
             scan_age: 0,
             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
@@ -746,6 +806,8 @@ impl Streaming {
             written: Default::default(),
             saves,
             deferred: Vec::new(),
+            throttle: false,
+            started_this_update: 0,
             sequence: 0,
             center: (0, 0),
             radius: 8,
@@ -759,6 +821,7 @@ impl Streaming {
             smooth_lighting: true,
             cutout_leaves: true,
             light_tables,
+            pending_relight: Vec::new(),
             light_log: Vec::new(),
             light_edit_sequence: 0,
             light_snapshots: Default::default(),
@@ -853,6 +916,18 @@ impl Streaming {
     /// Queue a job for the column `at`, nearest first: its distance (`distance`)
     /// times four plus `bias`, which orders a column's jobs. A job without a
     /// column (a save, meshes to free) goes ahead of every other.
+    /// Whether worldgen may start another job now: always, unless frames are
+    /// running long, and then one a frame.
+    fn generation_allowed(&mut self) -> bool {
+        if !self.throttle {
+            return true;
+        }
+        if self.started_this_update >= 1 {
+            return false;
+        }
+        self.started_this_update += 1;
+        true
+    }
     fn submit(&mut self, at: Option<(i32, i32)>, bias: i64, job: Job) {
         self.order += 1;
         let priority = at.map_or(i64::MIN, |(x, z)| self.distance(x, z) * 4 + bias);
@@ -1081,15 +1156,49 @@ impl Streaming {
             ("meshing", self.meshing.len()),
         ]
     }
+    /// Start the workers this streamer asked for but could not claim when it
+    /// was built. Called before scheduling, so a claim made free by a job
+    /// that finished is taken at once and the queue never runs on the frame.
+    fn claim_pending(&mut self) {
+        let mut started = 0;
+        let mut finished = false;
+        if let Some((left, spawn)) = self.pending_spawn.as_mut() {
+            while *left > 0 {
+                if !spawn() {
+                    break;
+                }
+                *left -= 1;
+                started += 1;
+            }
+            finished = *left == 0;
+        }
+        if started > 0 {
+            self.workers += started;
+            log::info!(
+                "Horizon: streaming: {started} worker(s) claimed later (workers {})",
+                self.workers
+            );
+        }
+        if finished {
+            self.pending_spawn = None;
+        }
+    }
     /// Advance streaming: collect finished work, then schedule more.
     /// Returns meshes ready for upload and columns that were unloaded.
     pub fn update(
         &mut self,
         world: &mut World,
     ) -> (Vec<((i32, i32, i32), SectionMesh)>, Vec<Arc<Chunk>>) {
+        self.started_this_update = 0;
         let mut uploads = Vec::new();
         if self.paused {
             return (uploads, Vec::new());
+        }
+        if self.pending_spawn.is_some() {
+            self.claim_pending();
+            if self.workers == 0 {
+                return (uploads, Vec::new());
+            }
         }
         ExtraCover::refresh(&mut self.cover, &self.extra);
         // The sweeps below walk every loaded column and proto chunk. Run them
@@ -1099,15 +1208,36 @@ impl Streaming {
         let sweep = area != self.scan_area || self.scan_age >= 8;
         self.scan_area = area;
         self.scan_age = if sweep { 0 } else { self.scan_age + 1 };
-        self.requeue();
-        self.relight_edits(world);
-        let budget_ms = if self.loading { 24 } else { 10 };
-        self.pump_inline(std::time::Duration::from_millis(budget_ms));
+        crate::spans::time("stream_requeue", || self.requeue());
+        crate::spans::time("stream_light", || self.relight_edits(world));
+        // The tick thread runs these jobs itself while a world is opening, and
+        // one job (a finish, a light, a mesh) is not interruptible: the budget
+        // only stops the next one. 24 ms let one tick start three of them and
+        // spend 60-80 ms in the pump; at 8 ms it starts at most the one that
+        // does not fit.
+        let budget_ms = if self.loading { 8 } else { 10 };
+        crate::spans::time("stream_pump", || {
+            self.pump_inline(std::time::Duration::from_millis(budget_ms))
+        });
         let deferred = std::mem::take(&mut self.deferred);
         let received = self.shared.done.take();
         // Meshes made stale meanwhile, freed with the uploaded ones (`free`).
         let mut stale = Vec::new();
-        for done in deferred.into_iter().chain(received) {
+        // Applying a finished chunk is the expensive half of generation (the
+        // world insert, its light and its post-process), and a whole view's
+        // worth arriving at once cost 118 ms of the server's tick when a world
+        // opened. Only what fits the budget is applied per tick; the rest stays
+        // in `deferred` for the next one, so a tick that receives many chunks
+        // stays bounded.
+        let apply_budget = std::time::Duration::from_millis(if self.loading { 8 } else { 4 });
+        let apply_started = horizon_core::time::Instant::now();
+        let mut pending = deferred.into_iter().chain(received);
+        while let Some(done) = pending.next() {
+            if apply_started.elapsed() >= apply_budget {
+                self.deferred.push(done);
+                self.deferred.extend(pending);
+                break;
+            }
             match done {
                 Done::Proto(x, z, proto, decorated) => {
                     self.generation_scan.exhausted = false;
@@ -1190,7 +1320,8 @@ impl Streaming {
                 }
             }
         }
-        self.free(stale);
+        crate::spans::add("stream_apply", apply_started.elapsed());
+        crate::spans::time("stream_free", || self.free(stale));
         let mut removed = Vec::new();
         if sweep {
             // Unload far columns.
@@ -1390,11 +1521,16 @@ impl Streaming {
                     Ok(r) => Box::new(r),
                     Err(_) => continue,
                 };
+                if !self.generation_allowed() {
+                    break;
+                }
                 self.decorating += 1;
                 self.submit(Some((x, z)), 1, Job::Decorate(x, z, region));
             }
         }
-        self.schedule_generation(world, workers);
+        if self.generation_allowed() {
+            self.schedule_generation(world, workers);
+        }
         // Lighting once all neighbours exist.
         let light: Vec<_> = world.dirty_light.iter().copied().collect();
         for (x, z) in light {
@@ -1533,34 +1669,56 @@ impl Streaming {
     /// Relight block edits on lit chunks in place (vanilla's incremental light
     /// engine) instead of recomputing the 3x3 chunks around each edit.
     fn relight_edits(&mut self, world: &mut World) {
-        if world.light_edits.is_empty() {
-            return;
-        }
-        let edits = std::mem::take(&mut world.light_edits);
-        let positions: Vec<(i32, i32, i32)> = edits
-            .iter()
-            .filter(|(_, old, new)| self.light_tables.differs(*old, *new))
-            .map(|(p, _, _)| *p)
-            .collect();
-        if positions.is_empty() {
-            return;
-        }
-        let mut changed = LightChanges::default();
-        crate::light::relight(
-            &mut world.chunks,
-            &self.light_tables,
-            self.sky_light,
-            &positions,
-            false,
-            &mut changed,
-        );
-        Self::mark_light_changes(world, &changed);
-        if !self.light_snapshots.is_empty() {
-            for p in positions {
-                self.light_edit_sequence += 1;
-                self.light_log.push((self.light_edit_sequence, p));
+        // Block edits are relit in `light::relight` batches. A batch floods a
+        // whole region per edit, so a view's worth of edits in one update was
+        // 78 ms of a tick (the client's `stream_light`/`lt_block`). Only what
+        // fits this update's budget runs; the rest keeps its order in
+        // `pending_relight` and runs on the following updates. Each edit's
+        // flood fill converges from the light and blocks around it, so running
+        // them in batches reaches the same values as running them together.
+        if !world.light_edits.is_empty() {
+            let edits = std::mem::take(&mut world.light_edits);
+            for (p, old, new) in edits {
+                if self.light_tables.differs(old, new) {
+                    self.pending_relight.push(p);
+                }
             }
         }
+        if self.pending_relight.is_empty() {
+            return;
+        }
+        const RELIGHT_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+        /// Edits per flood fill: small enough that one batch is well under the
+        /// budget. A cave column's 32 edits took 51 ms of one tick
+        /// (`stream_light`/`lt_block`); four keep a batch near 6 ms.
+        const RELIGHT_BATCH: usize = 4;
+        let started = horizon_core::time::Instant::now();
+        let mut done = 0;
+        while done < self.pending_relight.len() {
+            if done > 0 && started.elapsed() >= RELIGHT_BUDGET {
+                break;
+            }
+            let end = (done + RELIGHT_BATCH).min(self.pending_relight.len());
+            let batch = self.pending_relight[done..end].to_vec();
+            let mut changed = LightChanges::default();
+            crate::light::relight(
+                &mut world.chunks,
+                &self.light_tables,
+                self.sky_light,
+                &batch,
+                false,
+                &mut changed,
+            );
+            Self::mark_light_changes(world, &changed);
+            if !self.light_snapshots.is_empty() {
+                for p in batch {
+                    self.light_edit_sequence += 1;
+                    self.light_log.push((self.light_edit_sequence, p));
+                }
+            }
+            done = end;
+        }
+        self.pending_relight.drain(..done);
     }
     /// A light job computed from blocks older than some edits: redo those
     /// edits on top of its result.
@@ -1763,7 +1921,9 @@ impl Streaming {
             return;
         }
         let started = horizon_core::time::Instant::now();
-        while self.step_inline_once() {
+        // One job is a whole proto/decorate/finish/mesh step: on a
+        // frame thread the budget can only stop the next one.
+        while crate::spans::time("gen_job", || self.step_inline_once()) {
             if started.elapsed() >= budget {
                 break;
             }
@@ -1788,11 +1948,16 @@ impl Streaming {
             "queue": horizon_threads::lock(&self.shared.queue).len(),
             "inline": self.inline_step.is_some(),
             "exhausted": self.generation_scan.exhausted,
+            // Block edits waiting for their relight (a tick's light budget).
+            "relight_pending": self.pending_relight.len(),
         })
     }
     pub fn wait(&mut self, timeout: std::time::Duration) {
         // The page's main thread may not park (an `Atomic.wait` there traps),
         // so it looks at what arrived instead of waiting for more.
+        if self.pending_spawn.is_some() {
+            self.claim_pending();
+        }
         if self.inline_step.is_some() || !horizon_threads::can_block() {
             self.pump_inline(timeout);
             while let Some(done) = self.shared.done.try_recv() {
@@ -2169,7 +2334,7 @@ mod tests {
             .collect();
         assert_eq!(seqs, [1, 2]);
         assert!(mailbox.take().is_empty());
-        let waiting = std::time::Instant::now();
+        let waiting = horizon_core::time::Instant::now();
         assert!(
             mailbox
                 .recv_timeout(std::time::Duration::from_millis(10))
@@ -2520,7 +2685,8 @@ mod tests {
     #[test]
     #[ignore = "reproducible actual generation scheduler benchmark; run with --ignored --nocapture"]
     fn generation_scan_benchmark() {
-        use std::{hint::black_box, time::Instant};
+        use horizon_core::time::{Instant};
+use std::{hint::black_box};
         let mut f = GenerationFixture::new(32, true);
         f.fill_steady();
         let mut gate = GenerationScan::default();
@@ -2931,7 +3097,7 @@ mod cover_tests {
                 .collect();
             let rounds = 100;
             let time = |r: &Ranges| {
-                let t = std::time::Instant::now();
+                let t = horizon_core::time::Instant::now();
                 let mut n = 0usize;
                 for _ in 0..rounds {
                     for &(x, z) in &columns {
@@ -2943,7 +3109,7 @@ mod cover_tests {
                 std::hint::black_box(n);
                 t.elapsed().as_secs_f64() * 1e3 / f64::from(rounds)
             };
-            let t = std::time::Instant::now();
+            let t = horizon_core::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(ExtraCover::new(std::hint::black_box(&extra)));
             }

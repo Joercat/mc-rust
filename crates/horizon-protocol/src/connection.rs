@@ -64,9 +64,14 @@ impl Read for Pipe {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         let deadline = horizon_core::sync::lock(&self.timeout).map(|t| Instant::now() + t);
         let mut state = horizon_core::sync::lock(&self.end.incoming.state);
+        // A timed wait needs a clock and wasm32 has none, so the memory pipe
+        // waits without a deadline there; native keeps its read timeout.
         while state.0.is_empty() && !state.1 {
             state = match deadline {
                 None => self.end.incoming.ready.wait(state).unwrap(),
+                Some(_) if cfg!(target_arch = "wasm32") => {
+                    self.end.incoming.ready.wait(state).unwrap()
+                }
                 Some(deadline) => {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {

@@ -12,13 +12,19 @@ pub trait SpawnLevel {
     fn has_fluid(&self, x: i32, y: i32, z: i32) -> bool;
     /// `Block.isFaceFull(state.getCollisionShape(level, pos), Direction.UP)`.
     fn top_face_full(&self, x: i32, y: i32, z: i32) -> bool;
+    /// `state.is(BlockTags.LEAVES)`: a leaf block's up face is full, so the
+    /// walk down from a column's top must skip it (`MOTION_BLOCKING_NO_LEAVES`).
+    fn is_leaves(&self, x: i32, y: i32, z: i32) -> bool;
 }
 
 /// PlayerSpawnFinder.getLevelRespawnPos in a dimension without a ceiling:
 /// the block above the column's top full-topped collision, unless water,
 /// lava or only non-colliding blocks are on top.
 pub fn level_respawn_pos(level: &impl SpawnLevel, x: i32, z: i32) -> Option<[i32; 3]> {
-    let top = level.height(HeightmapType::MotionBlocking, x, z);
+    // `Heightmap.Types.MOTION_BLOCKING_NO_LEAVES`: vanilla's spawn column search
+    // ignores leaves, so a player never lands on top of a tree and drops off it
+    // when they first walk away.
+    let top = level.height(HeightmapType::MotionBlockingNoLeaves, x, z);
     if top < level.min_y() {
         return None;
     }
@@ -26,11 +32,13 @@ pub fn level_respawn_pos(level: &impl SpawnLevel, x: i32, z: i32) -> Option<[i32
     if surface <= top && surface > level.height(HeightmapType::OceanFloor, x, z) {
         return None;
     }
-    for y in (level.min_y()..=top + 1).rev() {
+    // From the column's highest non-leaf block downward: the first full up face
+    // that is not a leaf is the ground the feet stand on.
+    for y in (level.min_y()..=top).rev() {
         if level.has_fluid(x, y, z) {
             break;
         }
-        if level.top_face_full(x, y, z) {
+        if level.top_face_full(x, y, z) && !level.is_leaves(x, y, z) {
             return Some([x, y + 1, z]);
         }
     }
@@ -228,6 +236,60 @@ mod tests {
         fn top_face_full(&self, _: i32, y: i32, _: i32) -> bool {
             y <= self.top
         }
+        fn is_leaves(&self, _: i32, _: i32, _: i32) -> bool {
+            false
+        }
+    }
+
+    /// A column with a ground block and a tree canopy above it. Asking for the
+    /// leaf-inclusive heightmap answers nonsense, so a search that used it can
+    /// never find a column: spawning on a canopy shows up as a failed spawn.
+    struct Canopy {
+        ground: i32,
+        canopy: i32,
+    }
+    impl SpawnLevel for Canopy {
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn height(&self, kind: HeightmapType, _: i32, _: i32) -> i32 {
+            match kind {
+                HeightmapType::MotionBlocking => i32::MIN,
+                HeightmapType::MotionBlockingNoLeaves => self.ground + 1,
+                _ => self.canopy + 1,
+            }
+        }
+        fn has_fluid(&self, _: i32, _: i32, _: i32) -> bool {
+            false
+        }
+        fn top_face_full(&self, _: i32, y: i32, _: i32) -> bool {
+            y <= self.canopy
+        }
+        fn is_leaves(&self, _: i32, y: i32, _: i32) -> bool {
+            y > self.ground && y <= self.canopy
+        }
+    }
+
+    #[test]
+    fn spawn_column_under_a_canopy_is_the_ground() {
+        // Ground at 70, leaves 71..=74. The feet belong at 71, on the ground;
+        // the old leaf-inclusive heightmap put them at 75.
+        let level = Canopy {
+            ground: 70,
+            canopy: 74,
+        };
+        assert_eq!(level_respawn_pos(&level, 5, -3), Some([5, 71, -3]));
+    }
+
+    #[test]
+    fn spawn_search_never_asks_for_a_leaf_inclusive_heightmap() {
+        // `Canopy::height` answers only `MotionBlockingNoLeaves` with a real
+        // column; any other kind makes the search find nothing.
+        let level = Canopy {
+            ground: 70,
+            canopy: 74,
+        };
+        assert_eq!(spawn_pos_in_chunk(&level, 0, 0), Some([0, 71, 0]));
     }
 
     #[test]

@@ -20,10 +20,7 @@ impl Game<'_> {
         self.tick_craft_table();
         self.tick_container_reach();
         self.load_entity_types();
-        if !self.world.block_entities.has_states() {
-            let states = self.ticking_states();
-            self.world.block_entities.set_states(states);
-        }
+        self.warm_block_entity_states();
         // Only lingering cooldowns are dropped; a hopper that ticks checks
         // its own block. Once a second is soon enough for the rest.
         if self.world.game_time % 20 == 0 {
@@ -92,6 +89,15 @@ impl Game<'_> {
     /// `BlockState.getTicker` of every state, for the block entities ticked
     /// here. A creaking heart keeps its slot while uprooted (see
     /// `tick_creaking_heart`).
+    /// The first `tick_block_entities` built the state map and read the entity
+    /// type table; built at world load instead, while the world is still
+    /// loading, rather than by the tick that first ran with a whole view.
+    pub(super) fn warm_block_entity_states(&mut self) {
+        if !self.world.block_entities.has_states() {
+            let states = self.ticking_states();
+            self.world.block_entities.set_states(states);
+        }
+    }
     fn ticking_states(&self) -> Vec<Ticking> {
         let registry = self.pack.assets.registry;
         (0..registry.len())

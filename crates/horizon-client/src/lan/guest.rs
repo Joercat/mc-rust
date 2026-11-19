@@ -75,6 +75,9 @@ pub struct Guest {
     /// The hub tick the player was placed on: chunks go out from the tick
     /// after next, behind the first doTick's packets, as vanilla's do.
     pub placed_at: u64,
+    /// The next step of the join's queued packets (`Hub::join_step`), 0 when
+    /// the player has been placed and nothing is waiting.
+    pub join_step: u8,
     /// The chunk cache centre placeNewPlayer already sent.
     pub center_sent: Option<(i32, i32)>,
     /// Why the connection closed (the console's "lost connection").
@@ -275,6 +278,7 @@ impl Guest {
             last_seen: Default::default(),
             signatures: Default::default(),
             placed_at: 0,
+            join_step: 0,
             center_sent: None,
             left_reason: String::new(),
             uuid: j.uuid,

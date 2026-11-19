@@ -3400,7 +3400,7 @@ mod tests {
             sample.water.is_some(),
             "fixture includes underwater terrain"
         );
-        let started = std::time::Instant::now();
+        let started = horizon_core::time::Instant::now();
         let mut exact = Vec::new();
         for z in 0..8 {
             for x in 0..8 {
@@ -3408,7 +3408,7 @@ mod tests {
             }
         }
         let dense_time = started.elapsed();
-        let started = std::time::Instant::now();
+        let started = horizon_core::time::Instant::now();
         let direct = worker.lod_grid(-1024, 0, 32, 8, false).unwrap();
         for z in 0..8 {
             for x in 0..8 {

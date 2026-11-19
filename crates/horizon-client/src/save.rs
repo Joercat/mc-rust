@@ -39,7 +39,7 @@ use horizon_world::{
     registry::{BlockRegistry, BlockStateId},
     worldgen::terrain::TerrainBlockStates,
 };
-use std::{collections::BTreeMap, collections::HashMap, collections::HashSet, path::Path, path::PathBuf, sync::Arc, sync::Condvar, sync::Mutex, sync::OnceLock, sync::atomic::AtomicU64, sync::atomic::Ordering, sync::mpsc};
+use std::{collections::BTreeMap, collections::HashMap, collections::HashSet, path::Path, path::PathBuf, sync::Arc, sync::Condvar, sync::Mutex, sync::OnceLock, sync::atomic::AtomicU64, sync::atomic::AtomicUsize, sync::atomic::Ordering, sync::mpsc};
 use horizon_core::vfs as fs;
 
 pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
@@ -2002,9 +2002,11 @@ fn write_batch(
         .filter_map(|(k, r, _)| Some((*k, resolve_poi(root, cache, *k, r)?)))
         .collect();
     let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
-    log::info!("Horizon: writing {} {folder} records", records.len());
+    // Per write is per two records (see `queue`), and a save is hundreds of
+    // writes: `debug` here, and one `info` line when the save's queue empties.
+    log::debug!("Horizon: writing {} {folder} records", records.len());
     let result = write_region_records(root, cache, folder, &records);
-    log::info!("Horizon: wrote {folder} records");
+    log::debug!("Horizon: wrote {folder} records");
     if let Err(e) = &result {
         let message = format!("failed to write {folder} files: {e}");
         log::warn!("Horizon: {message}");
@@ -2049,6 +2051,11 @@ pub struct SaveDir {
     /// waits for a worker that is not there).
     #[cfg(target_arch = "wasm32")]
     queued: Mutex<std::collections::VecDeque<WriteBatch>>,
+    /// Records written since the queue last emptied: without this every
+    /// two-record write logged, so one autosave put hundreds of lines in the
+    /// console; with it a whole save is one line.
+    #[cfg(target_arch = "wasm32")]
+    saved: AtomicUsize,
     /// Set by `Persistent` before the first load.
     pub tables: OnceLock<Arc<SaveTables>>,
     /// The dimension's skylight and height, from its folder name.
@@ -2094,6 +2101,8 @@ impl SaveDir {
             outstanding: Default::default(),
             #[cfg(target_arch = "wasm32")]
             queued: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            saved: AtomicUsize::new(0),
             tables: OnceLock::new(),
             shape,
             lod_regions: Default::default(),
@@ -2395,11 +2404,14 @@ impl SaveDir {
         #[cfg(target_arch = "wasm32")]
         {
             let started = horizon_core::time::Instant::now();
+            let mut pieces = 0usize;
             loop {
                 let next = horizon_core::sync::lock(&self.queued).pop_front();
                 let Some((folder, batch)) = next else {
                     break;
                 };
+                self.saved.fetch_add(batch.len(), Ordering::Relaxed);
+                pieces += 1;
                 write_batch(
                     &self.root,
                     &self.regions,
@@ -2415,7 +2427,14 @@ impl SaveDir {
                 }
             }
             self.write_result()?;
-            self.writes_finished()
+            let finished = self.writes_finished()?;
+            // One line per save: the pass that empties the queue reports what
+            // every pass since the last one wrote.
+            if finished && pieces > 0 {
+                let records = self.saved.swap(0, Ordering::Relaxed);
+                log::info!("Horizon: saved {records} records");
+            }
+            Ok(finished)
         }
     }
     /// Poll durability without holding up the event loop. Errors remain visible

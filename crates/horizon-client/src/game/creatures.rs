@@ -547,7 +547,17 @@ impl Game<'_> {
             .map(|(k, _)| *k)
             .collect();
         horizon_client::spans::time("creatures_fresh", || {
+            // A world that just opened has a whole view of columns that have
+            // never had their creature packs: 8.5 ms in one tick. A column's
+            // pack is seeded from the column, so spreading them over ticks
+            // changes nothing but when the animals appear; the ones the budget
+            // does not reach keep their `fresh` flag and come back next tick.
+            const FRESH_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+            let deadline = horizon_core::time::Instant::now() + FRESH_BUDGET;
             for key in fresh {
+                if horizon_core::time::Instant::now() >= deadline {
+                    break;
+                }
                 if let Some(c) = self.world.chunks.get_mut(&key) {
                     Arc::make_mut(c).fresh = false;
                 }
@@ -559,10 +569,10 @@ impl Game<'_> {
         // ServerChunkCache.tickChunks: the custom spawners tick only with spawn_mobs.
         if self.ui.rules.bool("spawn_mobs") {
             horizon_client::spans::time("creatures_spawners", || {
-                self.tick_wandering_trader();
-                self.tick_patrol_spawner();
-                self.tick_cat_spawner();
-                self.tick_village_siege();
+                horizon_client::spans::time("spawner_trader", || self.tick_wandering_trader());
+                horizon_client::spans::time("spawner_patrol", || self.tick_patrol_spawner());
+                horizon_client::spans::time("spawner_cat", || self.tick_cat_spawner());
+                horizon_client::spans::time("spawner_siege", || self.tick_village_siege());
             });
         }
         horizon_client::spans::time("creatures_raids", || self.tick_raids());

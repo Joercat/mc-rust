@@ -1442,6 +1442,14 @@ struct WorldIcon {
     last_attempt: Option<Instant>,
 }
 
+/// One block `entity_inside` still owes an answer, with what a big dripleaf
+/// asks of it (`tick_blocks`' due queue).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum InsideWork {
+    Inside(BlockPos),
+    Standing(BlockPos, bool, f64),
+}
+
 struct Game<'a> {
     /// Shared with an integrated server; `collision` and `motion` borrow from it.
     res: Arc<Resources>,
@@ -1596,6 +1604,17 @@ struct Game<'a> {
     /// moved: adaptive scaling's inputs.
     frame_ms_ema: f32,
     scale_frames: u32,
+    /// Windows in a row that ran over budget, and in a row that had room: the
+    /// configured scale is left only after sustained slowness, so a frame time
+    /// that bounces around the budget never moves the picture.
+    over_windows: u32,
+    under_windows: u32,
+    /// The last window asked for no change: the scale is holding where it is,
+    /// inside the band around the budget or against a bound.
+    scale_settled: bool,
+    /// The configured scale those two fields were judged against, so a change
+    /// in the settings starts the judgement over.
+    scale_cap_seen: f32,
     /// A frame budget a test sets in ms (0: the default 30 fps).
     frame_budget_override: f32,
     /// `item_level` for one frame, game time, day time and dimension.
@@ -1789,6 +1808,15 @@ struct Game<'a> {
     tick_chunks: horizon_client::tick_chunk_membership::TickChunkMembership,
     tickets: horizon_client::ticket_levels::ChunkTickets,
     random_tick_sections: horizon_client::random_tick_sections::RandomTickSections,
+    /// The random-ticking columns still due, in order (`tick_blocks`).
+    random_tick_due: Vec<(i32, i32)>,
+    /// The chests whose golem openers are still to be checked
+    /// (`copper_golems::recheck_golem_openers`).
+    golem_recheck_due: Vec<(i32, i32, i32)>,
+    /// The blocks still to ask whether an entity stands on them (`tick_blocks`).
+    entity_inside_due: Vec<InsideWork>,
+    /// The host events this tick did not reach, in order (`lan_events`).
+    lan_pending: lan::PendingEvents,
     level_events: Vec<LevelEvent>,
     falling: Vec<FallingBlock>,
     paintings: Vec<horizon_client::entities::Painting>,
@@ -1878,6 +1906,10 @@ struct Game<'a> {
     spawners: spawner::SpawnerState,
     /// Reused candidate buffers for natural spawning.
     spawn_scratch: natural_spawning::SpawnScratch,
+    /// Mobs a spawn pass made whose first tick is still owed: they are added
+    /// a few per tick, because a whole view's worth in one tick turned the
+    /// mob tick into 88 ms (each new mob's first tick is the expensive one).
+    spawn_add_backlog: Vec<Mob>,
     trident_model: Option<horizon_client::mobs::Part>,
     arrow_model: Option<horizon_client::mobs::Part>,
     tnts: Vec<tnt::PrimedTnt>,
@@ -3135,13 +3167,29 @@ impl Game<'_> {
     }
     /// Track which chunks are ticking (Ticks needs chunk load/unload).
     fn sync_tick_chunks(&mut self) {
-        if !self.tick_chunks.synchronize(&self.world.chunks) {
+        let fresh = self.tick_chunks.synchronize(&self.world.chunks);
+        if !fresh && !self.tick_chunks.has_added() {
             return;
         }
         // Move only the added keys out so registration can borrow all of Game.
         let added = self.tick_chunks.take_added();
+        // A world that just opened has a whole view of columns to register
+        // (16 ms of one tick). They are registered over the following ticks;
+        // the rest wait in `added` and are picked up by the next call.
+        const REGISTER_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+        let deadline = horizon_core::time::Instant::now() + REGISTER_BUDGET;
+        let mut done = 0;
         for &key in &added {
+            if horizon_core::time::Instant::now() >= deadline {
+                break;
+            }
+            done += 1;
             self.register_chunk_ticks(key);
+        }
+        if done < added.len() {
+            self.tick_chunks.recycle_added(added[done..].to_vec());
+        } else {
+            self.tick_chunks.recycle_added(added);
         }
         for &key in self.tick_chunks.removed() {
             self.random_tick_sections.remove(&key);
@@ -3153,7 +3201,6 @@ impl Game<'_> {
                 .moving_pistons
                 .retain(|(p, _)| (p.x >> 4, p.z >> 4) != key);
         }
-        self.tick_chunks.recycle_added(added);
     }
     /// `DistanceManager`'s tickets of the level in place, from every player in
     /// it (the local player, LAN guests, a server's players) and its forced
@@ -3298,6 +3345,22 @@ impl Game<'_> {
                 }
             }
         }
+        // The blocks under the players, the guests, the mobs and the other
+        // entities are asked whether something stands on them; a world opening
+        // with a spawned wave asks about hundreds in one tick (53.1 ms of
+        // one). They keep a due queue instead, in order, and one tick walks it
+        // for at most the budget: what it does not reach is still due, at the
+        // front of the queue, on the next tick.
+        const INSIDE_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+        let mut queue = std::mem::take(&mut self.entity_inside_due);
+        queue.extend(inside.into_iter().map(InsideWork::Inside));
+        queue.extend(
+            standing
+                .into_iter()
+                .map(|(pos, on_ground, feet_y)| InsideWork::Standing(pos, on_ground, feet_y)),
+        );
+        let deadline = horizon_core::time::Instant::now() + INSIDE_BUDGET;
+        let mut done = 0;
         self.with_level(|b, level, ticks| {
             // The mobs and the other entities (items, orbs, projectiles...) too.
             let mut touched: Vec<BlockPos> = Vec::new();
@@ -3313,17 +3376,52 @@ impl Game<'_> {
             }
             touched.sort_unstable_by_key(|p| (p.x, p.y, p.z));
             touched.dedup();
-            for pos in inside.into_iter().chain(touched) {
-                b.entity_inside(level, ticks, pos);
+            for pos in touched {
+                if !queue.contains(&InsideWork::Inside(pos)) {
+                    queue.push(InsideWork::Inside(pos));
+                }
             }
-            for (pos, on_ground, feet_y) in standing {
-                b.entity_on_big_dripleaf(level, ticks, pos, on_ground, feet_y);
+            for work in &queue {
+                if horizon_core::time::Instant::now() >= deadline {
+                    break;
+                }
+                done += 1;
+                match *work {
+                    InsideWork::Inside(pos) => b.entity_inside(level, ticks, pos),
+                    InsideWork::Standing(pos, on_ground, feet_y) => {
+                        b.entity_on_big_dripleaf(level, ticks, pos, on_ground, feet_y);
+                    }
+                }
             }
         });
+        self.entity_inside_due = queue.split_off(done);
         self.process_level_events()?;
         self.tick_scheduled()?;
+        // Every random-ticking column of the view draws its ticks on every
+        // tick, and 117 columns arriving at once (a world opening) was 62.8 ms
+        // of one tick. The columns have a due queue instead: one tick works
+        // through it in order for at most the budget, and what it does not
+        // reach is still due, at the front of the queue, on the next tick. A
+        // column therefore gets its pass in the same order, one tick later at
+        // worst, rather than every column in one tick or none.
+        const RANDOM_TICK_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+        let eligible: std::collections::HashSet<(i32, i32)> = ticking.iter().copied().collect();
+        let mut queue = std::mem::take(&mut self.random_tick_due);
+        queue.retain(|c| eligible.contains(c));
+        let mut queued: std::collections::HashSet<(i32, i32)> = queue.iter().copied().collect();
+        for c in ticking {
+            if queued.insert(c) {
+                queue.push(c);
+            }
+        }
+        let deadline = horizon_core::time::Instant::now() + RANDOM_TICK_BUDGET;
+        let mut done = 0;
         self.with_level(|b, level, ticks| {
-            for (x, z) in ticking {
+            for &(x, z) in &queue {
+                if horizon_core::time::Instant::now() >= deadline {
+                    break;
+                }
+                done += 1;
                 // The sections are read again only after a block changed.
                 let mut read = None;
                 let mut sections = Default::default();
@@ -3345,6 +3443,7 @@ impl Game<'_> {
             b.run_block_events(level, ticks);
             b.tick_block_entities(level, ticks);
         });
+        self.random_tick_due = queue.split_off(done);
         // `PistonMovingBlockEntity.tick` pushes what its block just ran into,
         // with the progress it is about to take.
         let pushes = std::mem::take(&mut self.block_ticks.piston_pushes);
@@ -3383,11 +3482,20 @@ impl Game<'_> {
     /// the side effects of each (a shrieker summoning a warden, drops, game
     /// events) happen before the next tick runs, as they do inline in vanilla.
     pub(super) fn tick_scheduled(&mut self) -> Result<()> {
+        // A chunk that generates schedules ticks for what it holds, so a view
+        // arriving at once left 76 ms of due ticks in one tick. Due ticks are
+        // run for at most this long; the rest stay due (their deadlines are
+        // already in the past) and run, in the same order, on the next tick.
+        const SCHEDULED_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+        let deadline = horizon_core::time::Instant::now() + SCHEDULED_BUDGET;
         for fluids in [false, true] {
             if !self.with_level(|b, level, ticks| b.scheduled_begin(level, ticks, fluids)) {
                 continue;
             }
             loop {
+                if horizon_core::time::Instant::now() >= deadline {
+                    break;
+                }
                 // Due ticks run against one level while each leaves nothing for
                 // the game to apply (level events, spilled items or orbs): the
                 // next one would see the same level built again.
@@ -3415,7 +3523,22 @@ impl Game<'_> {
         let events = std::mem::take(&mut self.level_events);
         self.lan_record_events(&events);
         dispense_fixture::record_events(&events);
-        for event in events {
+        // Level events are the effects of what blocks did: a broken block's
+        // sound and drops, a dispenser's, a plant's growth. A world that just
+        // opened queues a whole view of them and applying them all was 28 ms
+        // of a tick. They run in order for at most this long; the event that
+        // does not fit and those after it go back to the front of the queue
+        // for the next tick.
+        const EVENTS_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+        let deadline = horizon_core::time::Instant::now() + EVENTS_BUDGET;
+        let mut events = events.into_iter();
+        for event in events.by_ref() {
+            if horizon_core::time::Instant::now() >= deadline {
+                let mut rest = vec![event];
+                rest.extend(events);
+                self.level_events.splice(0..0, rest);
+                break;
+            }
             match event {
                 LevelEvent::LevelEvent {
                     id: 2001,
@@ -5189,6 +5312,13 @@ impl Game<'_> {
             let s = self.world.block(x, y, z);
             if !self.res.facts().is_air(s) {
                 let f = self.res.facts().get(s);
+                // A spawnpoint under a tree stands on the ground below the
+                // canopy (`Heightmap.Types.MOTION_BLOCKING_NO_LEAVES`), not on
+                // the leaves: keep walking down past them.
+                if f.name.contains("leaves") && f.fluid == Fluid::None {
+                    y -= 1;
+                    continue;
+                }
                 let ok = f.full_collision
                     && f.fluid == Fluid::None
                     && !f.name.contains("leaves")
@@ -5232,7 +5362,7 @@ impl Game<'_> {
                 .spawn
                 .map(|s| Vec3::new(s[0] + 0.5, s[1], s[2] + 0.5));
         }
-        let feet = if let Some(p) = saved {
+        let mut feet = if let Some(p) = saved {
             let (cx, cz) = ((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4);
             self.streaming.center = (cx, cz);
             if !(-1..=1).all(|dz| (-1..=1).all(|dx| self.streaming.is_lit(cx + dx, cz + dz))) {
@@ -5320,6 +5450,21 @@ impl Game<'_> {
             self.ui.death_text = None;
             self.ui.death_confirm = None;
             self.capture(false);
+        }
+        // A pinned column (`?spawn=x,y,z`) overrides wherever the spawn path
+        // put the player, at exactly that column: `?spawn=105,136,-25` replays
+        // the ledge route, and `?spawn=105,200,-25` drops the player in from
+        // above it (a fall test).
+        if let Some([px, py, pz]) = web_pin_spawn() {
+            let at = Vec3::new(
+                f64::from(px) + 0.5,
+                f64::from(py),
+                f64::from(pz) + 0.5,
+            );
+            player.position = at;
+            player.velocity = Vec3::new(0.0, 0.0, 0.0);
+            self.streaming.center = (px >> 4, pz >> 4);
+            feet = at;
         }
         self.previous_position = feet;
         if entering {
@@ -5764,6 +5909,13 @@ impl Game<'_> {
     /// What the tick runs after the local player's own update: effects, the
     /// world's entities and blocks, and the network hub.
     fn tick_world(&mut self, running: bool) -> Result<()> {
+        // A tick's load work is bounded as a whole, not only unit by unit:
+        // once it has spent this long, the units that already carry over are
+        // left to the next tick rather than stacking another burst on a slow
+        // one, so a world-open tick stays near its largest single unit.
+        const TICK_LOAD_GUARD: std::time::Duration = std::time::Duration::from_millis(25);
+        let load_deadline = horizon_core::time::Instant::now() + TICK_LOAD_GUARD;
+        let loaded_enough = || horizon_core::time::Instant::now() >= load_deadline;
         self.share_spawn_conditions();
         self.update_chunk_tickets();
         horizon_client::spans::time("tick_effects", || self.tick_effects(running));
@@ -5779,7 +5931,9 @@ impl Game<'_> {
         // ticks before any entity, so what they drop or spawn (dispensed
         // items, popped crops) moves on the tick it appears, as in vanilla.
         horizon_client::spans::time("tick_local_hand", || self.tick_local_hand())?;
-        horizon_client::spans::time("postprocess_chunks", || self.postprocess_chunks())?;
+        if !loaded_enough() {
+            horizon_client::spans::time("postprocess_chunks", || self.postprocess_chunks())?;
+        }
         if running {
             horizon_client::spans::time("tick_blocks", || self.tick_blocks())?;
         }
@@ -5810,7 +5964,11 @@ impl Game<'_> {
             horizon_client::spans::time("tick_items", || self.tick_items());
             horizon_client::spans::time("touch_arrows", || self.touch_arrows());
         }
-        horizon_client::spans::time("spawn_loaded_entities", || self.spawn_loaded_entities());
+        if !loaded_enough() {
+            horizon_client::spans::time("spawn_loaded_entities", || {
+                self.spawn_loaded_entities_tick()
+            });
+        }
         if running {
             horizon_client::spans::time("tick_mobs", || self.tick_mobs())?;
             horizon_client::spans::time("recheck_golem_openers", || self.recheck_golem_openers());
@@ -8313,26 +8471,47 @@ impl Game<'_> {
     }
     /// Holds the frame budget by moving the world's resolution scale: down
     /// while frames run long, back up while they have room, at most one step per
-    /// window of frames and with hysteresis so it settles instead of
-    /// oscillating. The scale the settings ask for is the ceiling,
+    /// window of frames. The scale the settings ask for is the ceiling,
     /// [`horizon_client::gfx::MIN_RENDER_SCALE`] the floor.
+    ///
+    /// It holds the picture still until the slowness is real. Leaving the
+    /// configured scale takes [`ENTER`] windows in a row over budget, so a frame
+    /// time that merely bounces around the budget, and the single slow window a
+    /// chunk arrival makes while a world streams in, never blur a frame. Once it
+    /// is below the configured scale, every further window still over budget
+    /// steps it down again, so slowness that lasts is answered with fewer pixels
+    /// until the frames fit; between the two thresholds it holds where it is.
+    /// When the frames have room it climbs one step per window back to the scale
+    /// the settings asked for, and holds there.
     fn adapt_render_scale(&mut self, frame_ms: f32) {
         const STEP: f32 = 0.05;
-        const WINDOW: u32 = 20;
+        const WINDOW: u32 = 12;
+        // Over (under) budget by this much before a window counts as slow
+        // (roomy). The band between is left alone: that hysteresis is what keeps
+        // a frame time bouncing around the budget from moving the scale at all.
         const DOWN_AT: f32 = 1.15;
         const UP_AT: f32 = 0.85;
+        // Windows in a row that have to run long before the configured scale is
+        // left at all. One slow window is a chunk arriving, not a slow device.
+        const ENTER: u32 = 3;
         self.frame_budget_override = current_web_frame_budget();
         // Menus are not playing frames, and a paused game should not be tuned.
         if self.title.is_some() || self.screen != Screen::Playing || self.pause {
             self.frame_ms_ema = 0.0;
             self.scale_frames = 0;
+            self.over_windows = 0;
+            self.under_windows = 0;
             return;
         }
-        let budget = if self.frame_budget_override > 0.0 {
-            self.frame_budget_override
-        } else {
-            1000.0 / 30.0
-        };
+        let budget = self.web_frame_budget_ms();
+        // The frame the controller judges is the measured one plus whatever a
+        // harness simulates, so a no-GPU browser can show it a pixel-bound
+        // frame (zero in play).
+        let (sim_scale, sim_cap) = self
+            .renderer
+            .as_ref()
+            .map_or((1.0, 1.0), |r| (r.render_scale(), r.render_scale_cap()));
+        let frame_ms = frame_ms + web_simulated_pixel_cost(sim_scale, sim_cap);
         // One loading spike must not move the scale: the average carries it.
         self.frame_ms_ema = if self.frame_ms_ema == 0.0 {
             frame_ms
@@ -8349,20 +8528,63 @@ impl Game<'_> {
         };
         let now = r.render_scale();
         let cap = r.render_scale_cap();
-        let slow = self.frame_ms_ema > budget * DOWN_AT;
-        let roomy = self.frame_ms_ema < budget * UP_AT;
-        let next = if slow && now > horizon_client::gfx::MIN_RENDER_SCALE {
-            (now - STEP).max(horizon_client::gfx::MIN_RENDER_SCALE).min(cap)
-        } else if roomy && now < cap {
-            (now + STEP).min(cap)
+        // A ceiling the settings changed is a new decision: judge it again.
+        if (cap - self.scale_cap_seen).abs() > 0.001 {
+            self.scale_cap_seen = cap;
+            self.over_windows = 0;
+            self.under_windows = 0;
+        }
+        if self.frame_ms_ema > budget * DOWN_AT {
+            self.over_windows = self.over_windows.saturating_add(1);
+            self.under_windows = 0;
         } else {
-            now
-        };
-        if r.set_render_scale(next) {
+            self.over_windows = 0;
+            self.under_windows = if self.frame_ms_ema < budget * UP_AT {
+                self.under_windows.saturating_add(1)
+            } else {
+                0
+            };
+        }
+        let at_cap = (cap - now).abs() < 0.001;
+        let mut next = now;
+        if self.over_windows > 0 && now > horizon_client::gfx::MIN_RENDER_SCALE {
+            // Leaving the configured scale takes sustained slowness; already
+            // below it, one more slow window is enough to keep answering it.
+            let needed = if at_cap { ENTER } else { 1 };
+            if self.over_windows >= needed {
+                next = (now - STEP)
+                    .max(horizon_client::gfx::MIN_RENDER_SCALE)
+                    .min(cap);
+            }
+        } else if self.under_windows > 0 && !at_cap {
+            next = (now + STEP).min(cap);
+        }
+        let moved = r.set_render_scale(next);
+        if moved {
+            // Allocate the new size now rather than on the next frame, so the
+            // texture, the reported pixels and the scale agree for the frame
+            // that draws it.
+            r.resize_world_target();
+        }
+        // Reported through `__horizon_status`: the last window asked for no
+        // change, so the scale is holding where it is — inside the band around
+        // the budget, or against a floor or the configured ceiling.
+        self.scale_settled = !moved;
+        if moved {
             log::info!(
                 "Horizon: render scale {now:.2} -> {next:.2} ({:.0} ms frames, {budget:.0} ms budget)",
                 self.frame_ms_ema
             );
+        }
+    }
+    /// The frame the controller holds itself to: the one the page set for this
+    /// display in ms, else 60 fps — a browser that never drops below 16.7 ms
+    /// keeps full resolution, and the web build is no longer tuned to 30.
+    fn web_frame_budget_ms(&self) -> f32 {
+        if self.frame_budget_override > 0.0 {
+            self.frame_budget_override
+        } else {
+            1000.0 / 60.0
         }
     }
     /// ItemEntityRenderer: items bob and spin; blocks render as small cubes.
@@ -9339,16 +9561,16 @@ impl Game<'_> {
     }
     fn tick_mobs(&mut self) -> Result<()> {
         self.tick_creatures()?;
-        self.position_rider();
-        self.tick_stats();
-        self.tick_scoreboard();
-        self.load_bossbars();
-        self.tick_functions();
-        self.tick_worldborder();
-        self.tick_subtitles();
-        self.spawn_phantoms();
-        self.tick_advancements();
-        self.tick_player_model();
+        horizon_client::spans::time("position_rider", || self.position_rider());
+        horizon_client::spans::time("tick_stats", || self.tick_stats());
+        horizon_client::spans::time("tick_scoreboard", || self.tick_scoreboard());
+        horizon_client::spans::time("load_bossbars", || self.load_bossbars());
+        horizon_client::spans::time("tick_functions", || self.tick_functions());
+        horizon_client::spans::time("tick_worldborder", || self.tick_worldborder());
+        horizon_client::spans::time("tick_subtitles", || self.tick_subtitles());
+        horizon_client::spans::time("spawn_phantoms", || self.spawn_phantoms());
+        horizon_client::spans::time("tick_advancements", || self.tick_advancements());
+        horizon_client::spans::time("tick_player_model", || self.tick_player_model());
         Ok(())
     }
     /// SkyRenderer.renderSunMoonAndStars: bodies on a frame rotated Y -90 then X by angle.
@@ -14322,6 +14544,11 @@ impl ApplicationHandler for Game<'_> {
                                 ms(render),
                             ];
                             self.frame_stats.record_phases(phases);
+                            // What the four phases leave over: the event
+                            // pump before them and the frame's own tail after
+                            // (the limiter, status, input). A frame whose
+                            // parts do not add up has its cause here.
+                            let rest = (ms(elapsed) - phases.iter().sum::<f32>()).max(0.0);
                             // What a freeze is made of: the world update, the
                             // ticks, the wait for the GPU and the render. The
                             // whole-frame timer alone never said which.
@@ -14333,8 +14560,8 @@ impl ApplicationHandler for Game<'_> {
                                     _ => "menu",
                                 };
                                 log::info!(
-                                    "Horizon: frame update {:.0} ms, tick {:.0} ms, gpu wait {:.0} ms, render {:.0} ms (screen {screen}, container {}, autosave {}, chunks {})",
-                                    phases[0], phases[1], phases[2], phases[3],
+                                    "Horizon: frame update {:.0} ms, tick {:.0} ms, gpu wait {:.0} ms, render {:.0} ms, other {:.0} ms (screen {screen}, container {}, autosave {}, chunks {})",
+                                    phases[0], phases[1], phases[2], phases[3], rest,
                                     self.container.is_some(),
                                     self.pending_autosave.is_some(),
                                     self.world.chunks.len(),
@@ -14749,6 +14976,10 @@ impl<'a> Game<'a> {
             frames: 0,
             frame_ms_ema: 0.0,
             scale_frames: 0,
+            over_windows: 0,
+            under_windows: 0,
+            scale_settled: false,
+            scale_cap_seen: 0.0,
             frame_budget_override: 0.0,
             item_level_cache: Default::default(),
             world_frames: 0,
@@ -14867,6 +15098,10 @@ impl<'a> Game<'a> {
             tick_chunks: Default::default(),
             tickets: Default::default(),
             random_tick_sections: Default::default(),
+            random_tick_due: Vec::new(),
+            golem_recheck_due: Vec::new(),
+            entity_inside_due: Vec::new(),
+            lan_pending: Vec::new(),
             level_events: Vec::new(),
             falling: Vec::new(),
             paintings: Vec::new(),
@@ -14927,6 +15162,7 @@ impl<'a> Game<'a> {
             creaking: Default::default(),
             spawners: Default::default(),
             spawn_scratch: Default::default(),
+            spawn_add_backlog: Vec::new(),
             trident_model: prepared.trident_model,
             arrow_model: prepared.arrow_model,
             tnts: Vec::new(),
@@ -16523,6 +16759,35 @@ static WEB_SAVE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// (the browser harness sets it; nothing in the game does).
 static WEB_FORCE_UPLOADS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// A pinned spawn column from the page (`?spawn=x,y,z`), to replay a route.
+static WEB_PIN_SPAWN: std::sync::Mutex<Option<[i32; 3]>> = std::sync::Mutex::new(None);
+
+/// Frame time a harness asks the controller to *see* as proportional to the
+/// world's rendered pixels, in tenths of a millisecond at full resolution (0:
+/// off). A machine with no GPU cannot show the controller a frame that gets
+/// faster at a smaller size, so the browser harness supplies one; nothing in
+/// the game sets it.
+static WEB_SIM_PIXEL_COST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets that simulated cost, in milliseconds at full resolution (0: off).
+pub fn request_web_pixel_cost(ms: f32) {
+    WEB_SIM_PIXEL_COST.store(
+        (ms.max(0.0) * 10.0) as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The simulated cost at `scale` of the configured `cap`, in ms: the cost a
+/// pixel-bound frame would pay.
+fn web_simulated_pixel_cost(scale: f32, cap: f32) -> f32 {
+    let cost = WEB_SIM_PIXEL_COST.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+    if cost <= 0.0 || cap <= 0.0 {
+        return 0.0;
+    }
+    let fraction = (scale / cap).clamp(0.0, 2.0);
+    cost * fraction * fraction
+}
+
 /// The frame budget adaptive scaling aims for, in tenths of a millisecond (0:
 /// the default 30 fps). A browser harness sets it to watch the scale move.
 static WEB_FRAME_BUDGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -16554,6 +16819,18 @@ pub fn request_web_force_uploads(n: u32) {
 
 fn take_web_force_uploads() -> u32 {
     WEB_FORCE_UPLOADS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `?spawn=x,y,z`: the next world's spawn column is this one.
+pub fn request_web_pin_spawn(x: i32, y: i32, z: i32) {
+    if let Ok(mut slot) = WEB_PIN_SPAWN.lock() {
+        *slot = Some([x, y, z]);
+    }
+}
+
+/// The pinned spawn column, while the page has set one.
+pub(crate) fn web_pin_spawn() -> Option<[i32; 3]> {
+    WEB_PIN_SPAWN.lock().ok().and_then(|slot| *slot)
 }
 
 pub fn request_web_save() {
@@ -16610,25 +16887,92 @@ fn update_web_status(game: &Game<'_>) {
             "draws": r.draw_calls(),
             "vertices": r.terrain_vertices(),
             "pixels": r.target_pixels(),
+            "target_size": r.target_size(),
             "screen_pixels": r.screen_pixels(),
             "scale": r.render_scale(),
             "scale_cap": r.render_scale_cap(),
             "scale_steps": r.render_scale_steps(),
+            // The draw path as the renderer decided it this frame: the merged
+            // (`flat`) section draws, or one submission per section, and how
+            // many of each the frame actually issued.
+            "backend": r.backend_name(),
+            "merged_on": r.merged_section_draws(),
+            "flat_calls": r.flat_call_count(),
+            "section_calls": r.section_draw_calls,
+            "drawn_sections": r.drawn_sections,
+            // The frame time the controller judged in its last window and the
+            // budget it held it against, so a harness can see the verdict.
+            "frame_ms": game.frame_ms_ema,
+            "budget_ms": game.web_frame_budget_ms(),
+            "over_budget": game.frame_ms_ema > game.web_frame_budget_ms() * 1.15,
+            // The last window asked for no change: the scale is holding where it
+            // is, inside the band around the budget or against a bound.
+            "settled": game.scale_settled,
             "budget": game.frame_budget_override,
         })
     });
+    let light_fingerprint: String = {
+        let mut rows: Vec<String> = Vec::new();
+        if let Some(p) = &game.player {
+            let (px, pz) = (p.position.x.floor() as i32, p.position.z.floor() as i32);
+            for y in (32..=96).step_by(8) {
+                for dx in (-40..=40).step_by(8) {
+                    for dz in (-40..=40).step_by(8) {
+                        let (x, z) = (px + dx, pz + dz);
+                        rows.push(format!("{x},{y},{z}={}", game.world.light(x, y, z)));
+                    }
+                }
+            }
+        }
+        rows.join(";")
+    };
     let json = serde_json::json!({
         "state": mode,
+        // How many of the page's workers are in the shared pool: the web
+        // build's parallelism, visible to a harness and to the HUD.
+        "threads": horizon_threads::pool_size(),
+        // How many of those workers are free: a streaming world holds some for
+        // its whole life, and startup work only goes to the pool when none are.
+        "threads_idle": horizon_threads::idle_workers(),
+        // The integrated server's ticks: the average the HUD shows, plus the
+        // slowest of the last ten seconds and its p95, against the 50 ms the
+        // 20 ticks a second budget. A tick that loads chunks inline shows here.
+        "server_tick": game.integrated.as_ref().map(|server| serde_json::json!({
+            "avg": server.smoothed_tick_ms(),
+            "max": server.tick_ms_max(),
+            "p95": server.tick_ms_p95(),
+            "budget": 50.0,
+        })),
+        // The last parallel pack load and model library: items, threads, cost,
+        // and a fingerprint of what it built (a pool load must match a
+        // single-threaded one exactly).
+        "par_map": {
+            "calls": horizon_client_render::par::last_report().0,
+            "items": horizon_client_render::par::last_report().1,
+            "threads": horizon_client_render::par::last_report().2,
+            "ms": horizon_client_render::par::last_report().3,
+        },
+        "model_library": {
+            "files": horizon_client_render::model_library::last_library().0,
+            "models": horizon_client_render::model_library::last_library().1,
+            "fingerprint": format!("{:016x}", horizon_client_render::model_library::last_library().2),
+        },
         "title": game.title.is_some(),
         "world_loader": game.world_loader.is_some(),
         "pending_entry": game.pending_entry.is_some(),
         "player_some": game.player.is_some(),
-        "world_name": game.level.name.clone(),
+        "world_name": game
+            .integrated
+            .as_ref()
+            .map(|server| server.world_name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| game.level.name.clone()),
         "error": game
             .error
             .as_ref()
             .map(|e| e.to_string())
             .or_else(web_last_error),
+        "mobs": game.mobs.len(),
         "streaming": game.streaming.debug_state(),
         "pause": game.pause,
         "frames": game.frames,
@@ -16638,6 +16982,11 @@ fn update_web_status(game: &Game<'_>) {
         "generated": game.streaming.generated_total,
         "meshed_sections": game.streaming.meshed_total,
         "pending_uploads": game.pending_uploads.len(),
+        // The light the world settled on, sampled on a fixed lattice around
+        // the player: a change to how light is computed — or to how much of
+        // it a tick processes — must leave the same values on the same seed
+        // at the same place, so the fingerprint is comparable across builds.
+        "light": light_fingerprint,
         "renderer": renderer,
         "player": pos,
     })
@@ -16738,9 +17087,11 @@ pub async fn run_web(
         control: None,
         // On the web there is no env var to opt into diagnostics, so always
         // collect the frame's named spans and log a frame's work once it is
-        // long enough to be a stutter.
+        // long enough to be a stutter: on the page the line is also the 20
+        // ticks a second budget, so a tick over 50 ms is reported, not only
+        // one over three quarters of the budget.
         spikes: if cfg!(target_arch = "wasm32") {
-            Some(75.0)
+            Some(50.0)
         } else {
             None
         },
@@ -16751,12 +17102,8 @@ pub async fn run_web(
         dedicated: None,
         benchmark: None,
         dev_mods: Vec::new(),
-        // Single player keeps its world in the frame. Running the integrated
-        // server in a page worker needs a slot for the server, the connection
-        // and the client's reader at once, and a page that starts few workers
-        // leaves the join waiting forever on a connection nobody reads. The
-        // tick's cost is bounded where the work happens instead.
-        server_thread: false,
+        // Single player's world ticks in a page worker, off the frame.
+        server_thread: true,
         execution_role: execution_role::ExecutionRole::Client,
     };
     // The web build has no env var to opt into diagnostics: always record the

@@ -2,7 +2,8 @@
 use super::{armor_stands::ArmorStandAssets, boats::BoatModels, minecarts::CartModels};
 use horizon_client::mobs::{EntityModelDocument, Part, load_model};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, hint::black_box, path::Path, time::Instant};
+use horizon_core::time::{Instant};
+use std::{collections::BTreeMap, fs, hint::black_box, path::Path};
 
 const WOODS: [&str; 11] = [
     "oak",

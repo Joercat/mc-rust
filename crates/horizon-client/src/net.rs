@@ -973,7 +973,7 @@ mod tests {
                 cookies: Cookies::default(),
                 debug: false,
             };
-            let started = std::time::Instant::now();
+            let started = horizon_core::time::Instant::now();
             if explicit_disconnect {
                 session.disconnect();
                 session.disconnect(); // Repeated cleanup is harmless.

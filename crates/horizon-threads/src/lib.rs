@@ -252,6 +252,19 @@ mod pool {
 
     /// How many workers the page started and that are ready for jobs.
     static POOL: AtomicUsize = AtomicUsize::new(0);
+    /// Jobs queued or running: the workers the pool has already spoken for. A
+    /// job that never returns (a streamer's `run_worker`) holds one for the
+    /// life of the page, so this is what says whether a worker is free.
+    static INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+    /// Workers kept free for the jobs that always have to run — the integrated
+    /// server's loop, the hub, the connection reader, LAN serving. A streamer
+    /// dispatches only while more than this many are idle, so no page can end
+    /// up with every worker held by a job that never returns.
+    static RESERVED: AtomicUsize = AtomicUsize::new(0);
+    /// The part of the reservation no streamer may take even when it is idle
+    /// (those same blocking jobs). A server's streamer uses its own share,
+    /// which `RESERVED` already keeps out of the client streamer's hands.
+    static ESSENTIAL: AtomicUsize = AtomicUsize::new(0);
     /// Jobs waiting for a worker, in the order they were queued.
     static JOBS: Mutex<VecDeque<Box<dyn FnOnce() + Send>>> = Mutex::new(VecDeque::new());
     static JOBS_READY: Condvar = Condvar::new();
@@ -262,9 +275,188 @@ mod pool {
         if POOL.load(Ordering::Relaxed) == 0 {
             return false;
         }
+        INFLIGHT.fetch_add(1, Ordering::Relaxed);
         horizon_core::sync::lock(&JOBS).push_back(Box::new(f));
         JOBS_READY.notify_one();
         true
+    }
+
+    /// How many workers are free right now: the pool minus the jobs it has
+    /// taken, queued or running.
+    pub fn idle_workers() -> usize {
+        POOL.load(Ordering::Relaxed)
+            .saturating_sub(INFLIGHT.load(Ordering::Relaxed))
+    }
+
+    /// Set the workers that stay free for the blocking jobs (`reserved`) and
+    /// how many of those no streamer may take (`essential`).
+    pub fn set_reserved(reserved: usize, essential: usize) {
+        RESERVED.store(reserved, Ordering::Relaxed);
+        ESSENTIAL.store(essential.min(reserved), Ordering::Relaxed);
+    }
+
+    /// The workers kept free for the blocking jobs.
+    pub fn reserved() -> usize {
+        RESERVED.load(Ordering::Relaxed)
+    }
+
+    /// Claim a worker if more than `floor` would stay free: the check and the
+    /// claim are one step, so two streamers starting at once cannot both take
+    /// the last slot.
+    fn claim(floor: usize) -> bool {
+        let mut inflight = INFLIGHT.load(Ordering::Acquire);
+        loop {
+            if POOL.load(Ordering::Relaxed).saturating_sub(inflight) <= floor {
+                return false;
+            }
+            match INFLIGHT.compare_exchange_weak(
+                inflight,
+                inflight + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => inflight = current,
+            }
+        }
+    }
+
+    fn push(f: Box<dyn FnOnce() + Send>) {
+        horizon_core::sync::lock(&JOBS).push_back(f);
+        JOBS_READY.notify_one();
+    }
+
+    /// Hand a job to the workers only while the reservation stays free. False
+    /// when the pool is full up to it, or there is no pool at all.
+    pub fn spawn_reserved_detached(f: impl FnOnce() + Send + 'static) -> bool {
+        if POOL.load(Ordering::Relaxed) == 0
+            || !claim(RESERVED.load(Ordering::Relaxed))
+        {
+            return false;
+        }
+        push(Box::new(f));
+        true
+    }
+
+    /// The same for a job that was given its own share of the reservation (an
+    /// integrated server's streamer). Its slots are already kept out of the
+    /// client streamer's reach, so it may take what is free apart from one
+    /// worker, which stays there for a blocking job that starts later (a
+    /// rejoin's reader, a hub that publishes).
+    pub fn spawn_earmarked_detached(f: impl FnOnce() + Send + 'static) -> bool {
+        if POOL.load(Ordering::Relaxed) == 0 || !claim(1.min(ESSENTIAL.load(Ordering::Relaxed))) {
+            return false;
+        }
+        push(Box::new(f));
+        true
+    }
+
+    /// `f` over `items` on the workers, results in `items`' order, returning
+    /// once every item has run; `None` when the pool cannot take the work and
+    /// the caller should do it itself.
+    ///
+    /// The pool's jobs are `'static` because they cross to a Web Worker, but
+    /// the items and the closure belong to the caller; addresses in the page's
+    /// shared linear memory mean the same thing on every worker, so the jobs
+    /// read them by address. This is `std::thread::scope`'s contract kept by
+    /// hand: the wait below does not return until every job has finished, so
+    /// nothing they point at goes away while they run. It only runs when the
+    /// pool is otherwise idle, because a job queued behind one that never
+    /// returns would never start.
+    pub fn par_map<T: Sync, R: Send + 'static, F: Fn(&T) -> R + Sync>(
+        items: &[T],
+        f: &F,
+    ) -> Option<Vec<R>> {
+        use std::{
+            sync::{Arc, Mutex as StdMutex},
+            sync::atomic::AtomicUsize as Counter,
+        };
+
+        /// An address in the page's shared linear memory: the same number on
+        /// every worker. Deliberately not generic, so a job's closure stays
+        /// `Send + 'static` whatever the items and the closure are (`*const T`
+        /// is neither, and its wrapper would carry `T`'s lifetime).
+        #[derive(Clone, Copy)]
+        struct At(*const u8);
+        // SAFETY: handed to workers only for one `par_map` call, which waits
+        // for every job before returning, so the referent outlives them.
+        unsafe impl Send for At {}
+        unsafe impl Sync for At {}
+        impl At {
+            /// The address as a typed pointer.
+            ///
+            /// # Safety
+            /// The referent must be alive and of type `T`: `par_map` waits for
+            /// every job it started before it returns.
+            unsafe fn as_ptr<T>(&self) -> *const T {
+                self.0 as *const T
+            }
+        }
+
+        struct Shared<R> {
+            next: Counter,
+            /// Jobs still running the loop: the wait is for this to reach zero.
+            running: Counter,
+            out: StdMutex<Vec<(usize, R)>>,
+        }
+
+        let len = items.len();
+        let threads = POOL.load(Ordering::Relaxed).min(len);
+        if threads == 0 || INFLIGHT.load(Ordering::Relaxed) != 0 {
+            return None;
+        }
+        let shared = Arc::new(Shared {
+            next: Counter::new(0),
+            running: Counter::new(0),
+            out: StdMutex::new(Vec::with_capacity(len)),
+        });
+        let items_at = At(items.as_ptr() as *const u8);
+        let f_at = At(f as *const F as *const u8);
+        let mut started = 0;
+        for _ in 0..threads {
+            let worker = Arc::clone(&shared);
+            worker.running.fetch_add(1, Ordering::SeqCst);
+            let spawned = spawn_detached(move || {
+                // Each worker keeps its own results and publishes them once:
+                // a lock per item costs more than the items do (11 workers
+                // contending for one mutex turned a 45 ms load into 55 ms).
+                let mut mine = Vec::new();
+                loop {
+                    let i = worker.next.fetch_add(1, Ordering::AcqRel);
+                    if i >= len {
+                        break;
+                    }
+                    // SAFETY: the wait in `par_map` is still on the stack, so
+                    // the caller's slice and closure are alive and unchanged
+                    // for the whole job.
+                    let items =
+                        unsafe { std::slice::from_raw_parts(items_at.as_ptr::<T>(), len) };
+                    let f = unsafe { &*f_at.as_ptr::<F>() };
+                    mine.push((i, f(&items[i])));
+                }
+                // Uncontended in practice: one lock per worker, while the page's
+                // main thread spins outside every lock.
+                worker.out.lock().unwrap().extend(mine);
+                worker.running.fetch_sub(1, Ordering::SeqCst);
+            });
+            if !spawned {
+                shared.running.fetch_sub(1, Ordering::SeqCst);
+                break;
+            }
+            started += 1;
+        }
+        if started == 0 {
+            return None;
+        }
+        // The page's main thread may not park (`Atomics.wait` throws there), so
+        // it spins; the workers are making progress on other threads meanwhile.
+        while shared.running.load(Ordering::SeqCst) > 0 {
+            std::hint::spin_loop();
+        }
+        let mut out = std::mem::take(&mut *shared.out.lock().unwrap());
+        debug_assert_eq!(out.len(), len, "every item runs exactly once");
+        out.sort_unstable_by_key(|(i, _)| *i);
+        Some(out.into_iter().map(|(_, r)| r).collect())
     }
 
     /// How many workers the page started (0: no threaded build).
@@ -294,6 +486,7 @@ mod pool {
                 }
             };
             job();
+            INFLIGHT.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -318,6 +511,37 @@ mod pool {
         0
     }
 
+    /// No pool, so nothing is left for one.
+    pub fn idle_workers() -> usize {
+        0
+    }
+
+    /// Nothing to reserve without a pool.
+    pub fn set_reserved(_reserved: usize, _essential: usize) {}
+
+    /// No reservation without a pool.
+    pub fn reserved() -> usize {
+        0
+    }
+
+    /// No pool to hand a reserved job to.
+    pub fn spawn_reserved_detached(_f: impl FnOnce() + Send + 'static) -> bool {
+        false
+    }
+
+    /// No pool to hand an earmarked job to.
+    pub fn spawn_earmarked_detached(_f: impl FnOnce() + Send + 'static) -> bool {
+        false
+    }
+
+    /// No pool: every caller runs its items itself.
+    pub fn par_map<T: Sync, R: Send, F: Fn(&T) -> R + Sync>(
+        _items: &[T],
+        _f: &F,
+    ) -> Option<Vec<R>> {
+        None
+    }
+
     pub fn register_worker() {}
 
     pub fn worker_main() -> ! {
@@ -325,7 +549,10 @@ mod pool {
     }
 }
 
-pub use pool::{pool_size, register_worker, spawn_detached, worker_main};
+pub use pool::{
+    idle_workers, par_map, pool_size, register_worker, reserved, set_reserved,
+    spawn_detached, spawn_earmarked_detached, spawn_reserved_detached, worker_main,
+};
 
 #[cfg(test)]
 mod tests {

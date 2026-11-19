@@ -20,6 +20,11 @@
 // a broken one.
 
 const DB_NAME = "horizon-web-assets";
+// Above this the stored copy costs more than the download: writing a 100 MB+
+// Blob stalls the page for minutes on a memory-constrained browser, where the
+// fetch of the same bytes takes seconds. The resource pack is such a file; the
+// engine and glue stay cached.
+const STORE_MAX = 48 * 1024 * 1024;
 const STORE = "assets";
 // The old stamp-keyed cache: two engines and a pack, revalidated every load.
 // It is dead weight now, so opening the new one drops it.
@@ -263,7 +268,9 @@ export function createAssetCache({
     const response = await fetchImpl(urlFor(name), { cache: "no-cache" });
     if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
     const fetched = await readBody(response, onProgress);
-    if (hash) {
+    // A file too big to store is used once and dropped: hashing it protects
+    // nothing and copies 100 MB+ on the main thread, which is a visible stall.
+    if (hash && fetched.length <= STORE_MAX) {
       const actual = await sha256Hex(fetched).catch(() => null);
       if (actual && actual !== hash) {
         // The host served bytes the build did not record. Use them — the page
@@ -273,7 +280,7 @@ export function createAssetCache({
         return { bytes: fetched, cached: false, key: `sha256:${actual}` };
       }
     }
-    if (db && !nocache) {
+    if (db && !nocache && fetched.length <= STORE_MAX) {
       const record = {
         key: key || `raw:${bare}`,
         // A Blob is stored on disk rather than in the IndexedDB heap.

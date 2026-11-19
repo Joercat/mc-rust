@@ -694,7 +694,7 @@ mod tests {
         packs::build_overlay(&vanilla, std::slice::from_ref(&pack), &out).unwrap();
         // A rebuild empties the output first: this file survives a cache hit only.
         fs::write(out.join("kept"), b"").unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let later = horizon_core::time::SystemTime::now() + std::time::Duration::from_secs(60);
         fs::OpenOptions::new()
             .append(true)
             .open(&zip)
@@ -934,7 +934,8 @@ mod tests {
     #[test]
     #[ignore = "requires prepared resources and real pack paths in environment"]
     fn benchmark_real_resource_root() {
-        use std::{hint::black_box, time::Instant};
+        use horizon_core::time::{Instant};
+use std::{hint::black_box};
         let vanilla = PathBuf::from(std::env::var("HORIZON_OVERLAY_BENCH_VANILLA").unwrap());
         assert!(vanilla.join("horizon-resources.json").is_file());
         let paths: Vec<PathBuf> =

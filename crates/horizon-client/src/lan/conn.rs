@@ -774,7 +774,7 @@ fn login_and_configure(
     .map_err(e)?;
     // The client may send its settings before acknowledging the login.
     loop {
-        let (id, payload) = c.recv().map_err(e)?;
+    let (id, payload) = c.recv().map_err(e)?;
         match login::Serverbound::decode(id, &payload).map_err(e)? {
             login::Serverbound::LoginAcknowledged(_) => break,
             login::Serverbound::CustomQueryAnswer(_) | login::Serverbound::CookieResponse(_) => {}
@@ -1014,11 +1014,25 @@ fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::net::So
     let events = shared.events.clone();
     let _ = c.reader.set_read_timeout(Some(READ_TIMEOUT));
     let (mut reader, writer) = c.split();
+
     let (tx, rx) = channel();
     let pending = Arc::new(AtomicUsize::new(0));
     let latency = Arc::new(AtomicI32::new(0));
     let alive = Arc::new(AtomicI64::new(-1));
     let sender = PlayerSender::new(tx.clone(), pending.clone());
+    // wasm has no OS threads, so the outbound queue is drained inline from the
+    // read loop; other platforms get the dedicated writer thread below.
+    #[cfg(target_arch = "wasm32")]
+    let mut outbox = Some(Outbox {
+        writer,
+        rx,
+        pending: pending.clone(),
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut outbox: Option<Outbox> = None;
+    #[cfg(target_arch = "wasm32")]
+    let writer_thread: Option<std::thread::JoinHandle<()>> = None;
+    #[cfg(not(target_arch = "wasm32"))]
     let writer_thread = {
         let (alive, latency, pending) = (alive.clone(), latency.clone(), pending.clone());
         std::thread::Builder::new()
@@ -1055,6 +1069,7 @@ fn play(c: Connection, shared: &Arc<Shared>, parts: Parts, address: std::net::So
             &alive,
             required_pack,
             shared.config.rate_limit,
+            outbox.as_mut(),
         ) {
             Ended::Closed(reason) => reason,
             Ended::PackDeclined(rejected) => {
@@ -1133,6 +1148,46 @@ enum Ended {
 /// Forward the player's packets until the connection ends: why it did, the
 /// id of a required resource pack the player declined (with
 /// `required_pack`), or a rate-limit excess, which disconnects them.
+/// The hub's outbound queue, drained on the calling task when the platform has
+/// no OS thread to run [`write_loop`] on (wasm).
+struct Outbox {
+    writer: ConnWriter,
+    rx: Receiver<Out>,
+    pending: Arc<AtomicUsize>,
+}
+/// Move queued packets onto the wire without blocking. `false` means the
+/// connection is finished.
+fn drain_out(out: &mut Outbox, budget: usize) -> bool {
+    for _ in 0..budget {
+        match out.rx.try_recv() {
+            Ok(Out::Packet(body)) => {
+                out.pending.fetch_sub(body.len(), Ordering::Relaxed);
+                if send_body(&mut out.writer, &body).is_err() {
+                    return false;
+                }
+            }
+            Ok(Out::Packets(bodies)) => {
+                for body in bodies {
+                    out.pending.fetch_sub(body.len(), Ordering::Relaxed);
+                    if send_body(&mut out.writer, &body).is_err() {
+                        return false;
+                    }
+                }
+            }
+            Ok(Out::Disconnect(reason)) => {
+                let _ = out
+                    .writer
+                    .send(&play::Clientbound::Disconnect(cfg::Disconnect { reason }).encode());
+                return false;
+            }
+            Ok(Out::Close) => return false,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 fn read_loop(
     reader: &mut ConnReader,
     conn: u32,
@@ -1140,9 +1195,22 @@ fn read_loop(
     alive: &AtomicI64,
     required_pack: bool,
     rate_limit: i32,
+    mut out: Option<&mut Outbox>,
 ) -> Ended {
     let mut rate = PacketRate::new(rate_limit, Instant::now());
     loop {
+        if let Some(out) = out.as_deref_mut()
+            && !drain_out(out, 16)
+        {
+            return Ended::Closed("write side closed".into());
+        }
+        {
+            use std::sync::atomic::{AtomicU32, Ordering as O};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let n = N.fetch_add(1, O::Relaxed);
+            if n < 3 || n % 50 == 0 {
+            }
+        }
         let (id, payload) = match reader.recv() {
             Ok(p) => p,
             // The client closed the connection: Connection.channelInactive

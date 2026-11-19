@@ -40,6 +40,11 @@ struct Flags {
     /// while it is not.
     published: AtomicU16,
     smoothed_tick_ms: AtomicU32,
+    /// The slowest tick of the last ten seconds and its p95, in an `f32`'s
+    /// bits: what the status readout reports, so a harness sees the spikes a
+    /// profile's `slow tick` line only hints at.
+    tick_ms_max: AtomicU32,
+    tick_ms_p95: AtomicU32,
     /// `options.renderDistance` and `options.simulationDistance`, which the
     /// server follows while it runs (IntegratedServer.tickServer).
     render_distance: AtomicI32,
@@ -75,6 +80,14 @@ pub(super) struct Integrated {
 impl Integrated {
     pub fn smoothed_tick_ms(&self) -> f32 {
         f32::from_bits(self.flags.smoothed_tick_ms.load(Ordering::Relaxed))
+    }
+    /// The slowest tick of the last ten seconds, in ms.
+    pub fn tick_ms_max(&self) -> f32 {
+        f32::from_bits(self.flags.tick_ms_max.load(Ordering::Relaxed))
+    }
+    /// The 95th percentile tick of the last ten seconds, in ms.
+    pub fn tick_ms_p95(&self) -> f32 {
+        f32::from_bits(self.flags.tick_ms_p95.load(Ordering::Relaxed))
     }
     /// `MinecraftServer.isCurrentlySaving`.
     pub fn is_saving(&self) -> bool {
@@ -464,6 +477,31 @@ impl Game<'_> {
             launch.create.as_ref(),
         )?)?;
         log::info!("Horizon: integrated server: world loaded");
+        // A server builds its advancement tree with the datapacks at world
+        // load, and the HUD's item-name lookups read the language pack: both
+        // were first done by the tick a player joined, which paid 38 ms and
+        // 26 ms for them. Built here, while the world is still loading.
+        let _ = self.advancement_tree();
+        let _ = self.pack.names.display_get("item.minecraft.stone");
+        // The item rarities and gameplay attributes are read out of the
+        // resources' JSON on first use too; the held item's name is what
+        // touches them first, in the HUD's tick.
+        let _ = self.item_rarity("minecraft:stone");
+        let _ = self.gameplay_attributes();
+        // The same for the first tick's other first-use reads: the entity type
+        // table the block entities resolve against (`entity-types.json`), the
+        // scoreboard, command storage, world border and stopwatch files, the
+        // raid save, and the block entities' ticking states. Each was paid by
+        // the first tick that ran with a whole view loaded: `tick_scoreboard`
+        // 35.3 ms, `tick_block_entities` 13.8, `creatures_raids` 15.1 in the
+        // runs that logged them.
+        self.load_entity_types();
+        self.load_scoreboard();
+        self.load_bossbars();
+        self.load_raids();
+        self.warm_block_entity_states();
+        // `spawn_phantoms` computes `sky_darken` on its first tick (9.7 ms).
+        let _ = self.sky_darken();
         let saved = Box::new(self.level.clone());
         // IntegratedServer runs the server mods; the window the client mods.
         self.mods.dev = self.options.dev_mods.clone();
@@ -552,6 +590,12 @@ impl Game<'_> {
         }
         let mut next = Instant::now();
         let mut was_paused = false;
+        // The last ten seconds of tick times (20 a second), for the max and p95
+        // the status reports: a `slow tick` line only names the worst, and the
+        // shape of the rest is what says whether the budget is met.
+        let mut tick_samples: std::collections::VecDeque<f32> =
+            std::collections::VecDeque::with_capacity(200);
+        let mut since_stats = 0u32;
         while !flags.stop.load(Ordering::Relaxed) {
             self.run_tasks();
             if self.agent.hold_server {
@@ -587,6 +631,24 @@ impl Game<'_> {
                     self.debug_charts.smoothed_tick_ms.to_bits(),
                     Ordering::Relaxed,
                 );
+                let tick_ms = started.elapsed().as_secs_f32() * 1000.0;
+                tick_samples.push_back(tick_ms);
+                while tick_samples.len() > 200 {
+                    tick_samples.pop_front();
+                }
+                since_stats += 1;
+                if since_stats >= 5 {
+                    since_stats = 0;
+                    let mut sorted: Vec<f32> = tick_samples.iter().copied().collect();
+                    sorted.sort_by(f32::total_cmp);
+                    if let Some(max) = sorted.last() {
+                        flags.tick_ms_max.store(max.to_bits(), Ordering::Relaxed);
+                    }
+                    let index = (sorted.len() * 95 / 100).min(sorted.len().saturating_sub(1));
+                    if let Some(p95) = sorted.get(index) {
+                        flags.tick_ms_p95.store(p95.to_bits(), Ordering::Relaxed);
+                    }
+                }
             }
             self.apply_publish();
             self.wait_for_next_server_tick(&mut next, paused);
@@ -911,6 +973,7 @@ fn serve(
     tasks: Receiver<Task>,
     ready: &Sender<Ready>,
 ) -> Result<()> {
+    log::info!("Horizon: server: opening world");
     let mut server = server_game(res, pack, options, settings)?;
     log::info!("Horizon: integrated server: game ready");
     server.run_integrated(launch, flags, tasks, ready)
@@ -955,6 +1018,7 @@ fn server_game(
     settings: Settings,
 ) -> Result<Game<'_>> {
     // It draws nothing: only the font, which books and chat measure with.
+    log::info!("Horizon: server: fonts");
     let atlas = HudAtlas::fonts(&options.resources)?;
     let gui = UiResources {
         atlas,
@@ -963,7 +1027,9 @@ fn server_game(
             pixels: [0u8; 4].repeat(6),
         }),
     };
+    log::info!("Horizon: server: audio");
     let audio = Audio::silent(&options.resources);
+    log::info!("Horizon: server: game");
     Game::new(res, pack, gui, options, settings, audio, None)
 }
 

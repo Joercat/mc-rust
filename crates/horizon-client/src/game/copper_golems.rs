@@ -57,11 +57,34 @@ impl Game<'_> {
     /// whose opened chest is this one, within its range plus 4; when none
     /// is left the chest closes (a double chest the golem left open).
     pub(super) fn recheck_golem_openers(&mut self) {
-        if self.world.game_time % RECHECK_TICKS != 0 {
+        // A world that just opened has a whole view's chests open at once (the
+        // golems the generation placed), and checking every one against every
+        // golem was 16.7 ms of that tick. The keys left over from the last
+        // recheck are checked first, for at most this long; the rest stay due
+        // for the next tick.
+        const RECHECK_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+        let recursive = self.world.game_time % RECHECK_TICKS == 0 || !self.golem_recheck_due.is_empty();
+        if !recursive {
             return;
         }
-        let open: Vec<(i32, i32, i32)> = self.world.chest_openers.keys().copied().collect();
-        for key in open {
+        let mut keys = std::mem::take(&mut self.golem_recheck_due);
+        if self.world.game_time % RECHECK_TICKS == 0 {
+            for key in self.world.chest_openers.keys() {
+                if !keys.contains(key) {
+                    keys.push(*key);
+                }
+            }
+        }
+        let deadline = horizon_core::time::Instant::now() + RECHECK_BUDGET;
+        let mut checked = 0;
+        for key in keys.iter().copied() {
+            if horizon_core::time::Instant::now() >= deadline {
+                break;
+            }
+            checked += 1;
+            if !self.world.chest_openers.contains_key(&key) {
+                continue;
+            }
             let p = [key.0, key.1, key.2];
             let other = self.chest_other_half(key).map(|o| [o.0, o.1, o.2]);
             let range = self.world.chest_openers.get(&key).map_or(0.0, |o| o.1) + 4.0;
@@ -101,6 +124,7 @@ impl Game<'_> {
             }
             self.block_entity_event(p, 1, count);
         }
+        self.golem_recheck_due = keys[checked..].to_vec();
     }
     /// `ChestBlockEntity.playSound` for a chest the recheck closed.
     fn golem_chest_sound(&mut self, p: [i32; 3], open: bool) {

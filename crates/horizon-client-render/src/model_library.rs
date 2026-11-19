@@ -6,6 +6,22 @@ use horizon_assets::{model::CuboidModel, resolve::ModelLibrary};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use horizon_core::vfs as fs;
 
+/// The last library built: files read, models parsed, and their fingerprint.
+static FILES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static MODELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FINGERPRINT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(files, models, fingerprint)` of the last model library loaded: a pool
+/// load must produce exactly what a single-threaded one did.
+pub fn last_library() -> (usize, usize, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        FILES.load(Relaxed),
+        MODELS.load(Relaxed),
+        FINGERPRINT.load(Relaxed),
+    )
+}
+
 #[derive(Default)]
 pub struct ParsedModels {
     models: BTreeMap<String, Arc<CuboidModel>>,
@@ -50,11 +66,29 @@ impl ParsedModels {
             let text = fs::read_to_string(path).ok()?;
             CuboidModel::from_json(&text).ok().map(Arc::new)
         });
+        let total = files.len();
         let models = files
             .into_iter()
             .zip(parsed)
             .filter_map(|((id, _), model)| Some((id, model?)))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        // A fingerprint for the harness: reading these on the pool has to build
+        // exactly the library one thread builds, ids and all.
+        let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
+        for id in models.keys() {
+            for byte in id.as_bytes().iter().chain(b"\0") {
+                fingerprint = (fingerprint ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        log::info!(
+            "Horizon: model library: {total} files, {} models, {fingerprint:016x}",
+            models.len()
+        );
+        // The same numbers where a harness can read them: a log line written
+        // from a worker thread never reaches the page's console.
+        FILES.store(total, std::sync::atomic::Ordering::Relaxed);
+        MODELS.store(models.len(), std::sync::atomic::Ordering::Relaxed);
+        FINGERPRINT.store(fingerprint, std::sync::atomic::Ordering::Relaxed);
         Self { models }
     }
 

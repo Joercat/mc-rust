@@ -372,9 +372,11 @@ impl Game<'_> {
     }
     /// `ServerPlayer.doTick` score updates and the statistic criteria.
     pub(super) fn tick_scoreboard(&mut self) {
-        self.load_scoreboard();
+        horizon_client::spans::time("scoreboard_load", || self.load_scoreboard());
         let events = std::mem::take(&mut self.stats.events);
-        self.stat_criteria_changed(PLAYER_NAME, events);
+        horizon_client::spans::time("scoreboard_stats", || {
+            self.stat_criteria_changed(PLAYER_NAME, events)
+        });
         let board = &mut self.score.board;
         if !board.objectives.is_empty() {
             let display = self.player_display_comp();

@@ -740,7 +740,7 @@ fn content_root_is_reused_until_a_mod_changes() {
     let lang = scratch.join("ruby/assets/ruby/lang/en_us.json");
     fs::write(&lang, r#"{"block.ruby.ruby_block": "Ruby Block"}"#).unwrap();
     let file = fs::File::options().write(true).open(&lang).unwrap();
-    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+    file.set_modified(horizon_core::time::SystemTime::now() + std::time::Duration::from_secs(5))
         .unwrap();
     resource_root(&base, std::slice::from_ref(&m), &cache).unwrap();
     assert!(!sentinel.exists(), "a changed mod kept the old root");

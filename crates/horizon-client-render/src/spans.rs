@@ -39,6 +39,16 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
     SPANS.with(|s| s.borrow_mut().push(Span { name, ms, cpu_ms }));
     out
 }
+/// Record a span that was timed by hand (a phase measured with an `Instant`
+/// around a loop that cannot be wrapped in a closure).
+#[inline]
+pub fn add(name: &'static str, elapsed: Duration) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let ms = elapsed.as_secs_f32() * 1000.0;
+    SPANS.with(|s| s.borrow_mut().push(Span { name, ms, cpu_ms: ms }));
+}
 /// The CPU time this thread has used, where the platform tells it: a tick
 /// with more wall time than CPU time waited (for a lock, or for a core on a
 /// busy machine).
@@ -142,7 +152,7 @@ mod tests {
         // Busy until the clock shows 10 ms of work (a loaded machine gives
         // the thread less than its wall time).
         let mut x = 0u64;
-        let busy = std::time::Instant::now();
+        let busy = horizon_core::time::Instant::now();
         let worked = loop {
             x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
             let worked = super::thread_cpu().unwrap() - start - slept;

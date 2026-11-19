@@ -1140,6 +1140,7 @@ enum FirstFrame {
 fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
+
 impl Renderer {
     /// Sections with GPU buffers, for soak tests watching residency.
     pub fn resident_sections(&self) -> usize {
@@ -3118,6 +3119,14 @@ impl Renderer {
             |s| u64::from(s[0]) * u64::from(s[1]),
         )
     }
+    /// The world target's own width and height: the texture that was allocated,
+    /// or the screen when the world draws straight to it. Reported beside
+    /// [`Self::target_pixels`] so a status read shows the real allocation.
+    pub fn target_size(&self) -> [u32; 2] {
+        self.world_post
+            .size()
+            .unwrap_or([self.config.width, self.config.height])
+    }
     /// Pixels the window presents each frame.
     pub fn screen_pixels(&self) -> u64 {
         u64::from(self.config.width) * u64::from(self.config.height)
@@ -3587,6 +3596,18 @@ impl Renderer {
     pub fn render_scale(&self) -> f32 {
         self.render_scale
     }
+    /// The wgpu backend the adapter chose (`metal`, `browsergpu`, `gl`, ...).
+    pub fn backend_name(&self) -> String {
+        format!("{:?}", self.adapter.get_info().backend).to_lowercase()
+    }
+    /// Whether sections go out as merged draws rather than one draw each.
+    pub fn merged_section_draws(&self) -> bool {
+        self.flat.is_some() && self.flat_on
+    }
+    /// The draws the merged path issued this frame (0 when it did not run).
+    pub fn flat_call_count(&self) -> usize {
+        self.flat_draw_calls
+    }
     /// The highest scale the settings allow (`resolution_scale`).
     pub fn render_scale_cap(&self) -> f32 {
         self.render_scale_cap
@@ -3608,6 +3629,14 @@ impl Renderer {
         self.world_post.scale = scale;
         self.render_scale_steps = self.render_scale_steps.saturating_add(1);
         true
+    }
+    /// Rebuilds the world target for the scale just set. Adaptive scaling calls
+    /// this on a step, so the allocated texture matches the scale before any
+    /// frame draws into it: the frame after the step renders at the new size and
+    /// a status read in between never pairs the new scale with the old texture.
+    pub fn resize_world_target(&mut self) {
+        let window = [self.config.width, self.config.height];
+        self.world_post.resize_now(&self.device, window);
     }
     /// Runs `post` over the world from now on (`None`: no pack), for the dimension `dimension`;
     /// `block_ids` gives each block sprite layer's `mc_Entity` (id, fluid) pair.
@@ -3722,7 +3751,7 @@ impl Renderer {
 
     fn pack_terrain_inputs(&mut self) -> Option<horizon_shaders::GbuffersInputs> {
         if self.pack_atlas.is_none() {
-            let mut encoder = self.device.create_command_encoder(&Default::default());
+                        let mut encoder = self.device.create_command_encoder(&Default::default());
             let layers = self
                 .sprite_textures
                 .iter()

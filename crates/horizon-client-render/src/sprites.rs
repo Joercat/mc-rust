@@ -560,7 +560,7 @@ mod tests {
         let root = horizon_core::vfs::temp_dir().join(format!(
             "horizon-sprite-detail-{}-{}",
             horizon_core::process::id(),
-            std::time::SystemTime::now()
+            horizon_core::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()

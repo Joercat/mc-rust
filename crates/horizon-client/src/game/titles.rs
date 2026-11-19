@@ -61,17 +61,19 @@ impl Game<'_> {
     }
     /// The title, action bar and selected-item parts of `Hud.tick`.
     pub(super) fn tick_hud(&mut self) {
-        self.titles.tick();
-        self.tick_in_bed_chat();
+        horizon_client::spans::time("hud_titles", || self.titles.tick());
+        horizon_client::spans::time("hud_bed", || self.tick_in_bed_chat());
         // `MinecraftServer.isCurrentlySaving` of single player's server.
         let saving = self
             .integrated
             .as_ref()
             .map_or(self.autosaving, |server| server.is_saving());
-        self.saving_indicator.tick(saving);
-        let held = self.held_name();
-        self.tool_highlight
-            .tick(held, f64::from(self.settings.notification_display_time));
+        horizon_client::spans::time("hud_saving", || self.saving_indicator.tick(saving));
+        let held = horizon_client::spans::time("hud_held", || self.held_name());
+        horizon_client::spans::time("hud_highlight", || {
+            self.tool_highlight
+                .tick(held, f64::from(self.settings.notification_display_time));
+        });
     }
     /// `Hud.extractSelectedItemName`.
     pub(super) fn draw_selected_name(&self, batch: &mut HudBatch, bar_height: i32, can_hurt: bool) {

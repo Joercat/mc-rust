@@ -349,7 +349,13 @@ fn auto_worker_threads() -> usize {
     {
         let pool = horizon_threads::pool_size();
         if pool > 0 {
-            return pool;
+            // Two jobs run on the pool for as long as the world is open —
+            // the hub's end of the memory connection and this client's
+            // reader — so those slots are never chunk workers. Reserving
+            // fewer starves the reader: the world opens and the client never
+            // joins. (A server on its own worker needs a third; see the
+            // `server_thread` note in `run_web`.)
+            return pool.saturating_sub(2).max(1);
         }
     }
     std::thread::available_parallelism()

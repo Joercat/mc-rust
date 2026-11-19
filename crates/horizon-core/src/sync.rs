@@ -197,7 +197,11 @@ pub fn join<T>(handle: std::thread::JoinHandle<T>) -> std::thread::Result<T> {
 
 /// Wait for `duration` without parking a thread that may not.
 pub fn sleep(duration: std::time::Duration) {
-    if may_block() {
+    // std's sleep needs a clock to wait for, and wasm32-unknown-unknown has
+    // none (`Instant::now` traps with "time not implemented on this
+    // platform"), so a page worker spins on the portable clock for the same
+    // reason the page's main thread does.
+    if may_block() && !cfg!(target_arch = "wasm32") {
         std::thread::sleep(duration);
         return;
     }

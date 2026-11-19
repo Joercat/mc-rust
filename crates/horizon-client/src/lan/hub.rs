@@ -33,6 +33,20 @@ use horizon_world::{
 };
 use std::sync::{Arc, atomic::Ordering};
 
+/// The join's queued packets, in `PlayerList.placeNewPlayer`'s order: one
+/// step a turn, under [`JOIN_BUDGET`], so no tick carries the whole burst.
+pub const JOIN_DONE: u8 = 0;
+const JOIN_LOGIN: u8 = 1;
+const JOIN_RECIPES: u8 = 2;
+const JOIN_PERMISSION: u8 = 3;
+const JOIN_BOOK: u8 = 4;
+const JOIN_LIST: u8 = 5;
+const JOIN_INFO: u8 = 6;
+const JOIN_LEVEL: u8 = 7;
+const JOIN_REST: u8 = 8;
+/// How long one tick spends on the joins it has queued.
+const JOIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+
 /// GameEvent types (ClientboundGameEventPacket).
 pub mod chat;
 
@@ -219,6 +233,9 @@ pub struct Hub {
     /// Server mods' commands, a root in the commands report's format, sent
     /// after vanilla's; the key the game last set them for.
     mod_commands: (serde_json::Value, Option<u64>),
+    /// The encoded `Commands` tree per (permission level, dedicated), built
+    /// once and copied to each guest that needs it.
+    commands_cache: std::collections::HashMap<(u8, bool), Vec<u8>>,
 }
 
 fn string(s: &str) -> Tag {
@@ -390,6 +407,7 @@ impl Hub {
             entities: Default::default(),
             entity_out: Vec::new(),
             mod_commands: (serde_json::Value::Null, None),
+            commands_cache: Default::default(),
             teams: Vec::new(),
         }
     }
@@ -703,112 +721,185 @@ impl Hub {
     }
 
     /// PlayerList.placeNewPlayer for a guest whose saved state is loaded.
+    /// `PlayerList.placeNewPlayer`: the ~200 packets a join takes, queued per
+    /// guest and drained a step a tick.
     pub fn place_new_player(&mut self, conn: u32, ctx: &mut TickCtx) {
         let Some(i) = self.guests.iter().position(|g| g.conn == conn) else {
             return;
         };
-        let (name, uuid, entity_id, mode) = {
-            let g = &self.guests[i];
-            (g.name.clone(), g.uuid, g.entity_id, g.game_mode)
-        };
-        let g = &self.guests[i];
-        g.send(&C::Login(play::Login {
-            player_id: entity_id,
-            hardcore: self.config.hardcore,
-            levels: Self::level_keys(),
-            max_players: self.config.max_players as i32,
-            chunk_radius: self.config.view_distance,
-            simulation_distance: self.config.simulation_distance,
-            reduced_debug_info: false,
-            show_death_screen: !self.immediate_respawn,
-            limited_crafting: false,
-            spawn: self.spawn_info(i),
-            // MinecraftServer.usesAuthentication, enforceSecureProfile.
-            online_mode: self.lan.shared.config.online.is_some(),
-            enforces_secure_chat: self.enforces_secure_chat(),
-        }));
-        g.send(&C::ChangeDifficulty(play::ChangeDifficulty {
-            difficulty: ctx.difficulty,
-            locked: ctx.difficulty_locked,
-        }));
-        g.send(&C::PlayerAbilities(play::PlayerAbilities {
-            flags: g.ability_flags(),
-            flying_speed: 0.05,
-            walking_speed: 0.1,
-        }));
-        g.send(&C::SetHeldSlot(play::SetHeldSlot {
-            slot: g.selected as i32,
-        }));
-        // PlayerList.placeNewPlayer: ClientboundUpdateRecipesPacket.
-        g.send(&raw(ids::UPDATE_RECIPES, self.sync.recipes.clone()));
-        // PlayerList.sendPlayerPermissionLevel, then the recipe book.
-        self.send_permission_level(i);
-        // ServerRecipeBook.sendInitialRecipeBook: each book's open and
-        // filtering flags, then every known recipe.
-        let g = &self.guests[i];
-        let book = &g.recipe_book;
-        let settings = (0..4)
-            .flat_map(|b| [u8::from(book.open[b]), u8::from(book.filtering[b])])
-            .collect();
-        g.send(&raw(ids::RECIPE_BOOK_SETTINGS, settings));
-        g.send(&raw(
-            ids::RECIPE_BOOK_ADD,
-            self.sync.advancements.initial_recipe_book(book, &self.sync),
-        ));
-        // The others hear of the newcomer before it joins the list.
-        self.broadcast_except(
-            conn,
-            &C::SystemChat(play::SystemChat {
-                content: yellow_names(
-                    "multiplayer.player.joined",
-                    vec![display_name(self.guests[i].uuid, &name)],
-                ),
-                overlay: false,
-            }),
-        );
-        self.guests[i].placed = true;
-        self.teleport(i, None);
-        let g = &self.guests[i];
-        g.send(&C::ServerData(play::ServerData {
-            motd: literal(&self.lan.shared.motd()),
-            icon: self.lan.shared.config.favicon.clone(),
-        }));
-        // The player list: everyone already here, then the newcomer to all.
-        let mut entries = Vec::new();
-        if let Some(host) = ctx.host {
-            entries.push(self.player_info(host.uuid, &host.name, host.game_mode, 0));
+        self.guests[i].join_step = JOIN_LOGIN;
+        self.drain_join(ctx);
+    }
+
+    /// One joining guest's next step, for as long as the budget holds.
+    fn drain_join(&mut self, ctx: &mut TickCtx) {
+        let start = horizon_core::time::Instant::now();
+        loop {
+            if start.elapsed() >= JOIN_BUDGET {
+                break;
+            }
+            // The level's own joins: `ctx` is this level, and a guest's
+            // level-info packets describe the level it is in.
+            let Some(i) = self
+                .guests
+                .iter()
+                .position(|g| g.join_step != JOIN_DONE && g.dimension == self.config.dimension)
+            else {
+                break;
+            };
+            self.join_step(i, ctx);
         }
-        for o in self.guests.iter().filter(|o| o.conn != conn && o.placed) {
-            entries.push(self.player_info(
-                o.uuid,
-                &o.name,
-                o.game_mode,
-                o.latency.load(Ordering::Relaxed),
-            ));
+    }
+
+    /// The span name of a join step.
+    fn join_span(step: u8) -> &'static str {
+        match step {
+            JOIN_LOGIN => "join_login",
+            JOIN_RECIPES => "join_recipes",
+            JOIN_PERMISSION => "join_perm",
+            JOIN_BOOK => "join_book",
+            JOIN_LIST => "join_list",
+            JOIN_INFO => "join_info",
+            JOIN_LEVEL => "join_level",
+            _ => "join_rest",
         }
-        self.guests[i].send(&C::PlayerInfoUpdate(play::PlayerInfoUpdate {
-            actions: Self::INFO_ACTIONS,
-            entries,
-        }));
-        let newcomer = play::PlayerInfoUpdate {
-            actions: Self::INFO_ACTIONS,
-            entries: vec![self.player_info(uuid, &name, mode, 0)],
-        };
-        self.broadcast(&C::PlayerInfoUpdate(newcomer));
-        self.send_level_info(i, ctx);
-        // ServerLevel.addNewPlayer: the chunk tracking starts at the player.
-        let g = &mut self.guests[i];
-        let (cx, cz) = g.chunk();
-        g.send(&C::SetChunkCacheCenter(play::SetChunkCacheCenter {
-            x: cx,
-            z: cz,
-        }));
-        g.center_sent = Some((cx, cz));
-        g.placed_at = self.ticks;
-        self.send_active_effects(i);
-        // ServerPlayer.sendPostEffects and initInventoryMenu.
-        self.guests[i].send(&raw(ids::POST_EFFECTS, vec![0]));
-        self.send_inventory(i);
+    }
+
+    /// The next packet (or packet building) of the join, in
+    /// `PlayerList.placeNewPlayer`'s order.
+    fn join_step(&mut self, i: usize, ctx: &mut TickCtx) {
+        let step = self.guests[i].join_step;
+        let t = horizon_core::time::Instant::now();
+        match step {
+            JOIN_LOGIN => {
+                let g = &self.guests[i];
+                let entity_id = g.entity_id;
+                g.send(&C::Login(play::Login {
+                    player_id: entity_id,
+                    hardcore: self.config.hardcore,
+                    levels: Self::level_keys(),
+                    max_players: self.config.max_players as i32,
+                    chunk_radius: self.config.view_distance,
+                    simulation_distance: self.config.simulation_distance,
+                    reduced_debug_info: false,
+                    show_death_screen: !self.immediate_respawn,
+                    limited_crafting: false,
+                    spawn: self.spawn_info(i),
+                    // MinecraftServer.usesAuthentication, enforceSecureProfile.
+                    online_mode: self.lan.shared.config.online.is_some(),
+                    enforces_secure_chat: self.enforces_secure_chat(),
+                }));
+                g.send(&C::ChangeDifficulty(play::ChangeDifficulty {
+                    difficulty: ctx.difficulty,
+                    locked: ctx.difficulty_locked,
+                }));
+                g.send(&C::PlayerAbilities(play::PlayerAbilities {
+                    flags: g.ability_flags(),
+                    flying_speed: 0.05,
+                    walking_speed: 0.1,
+                }));
+                g.send(&C::SetHeldSlot(play::SetHeldSlot {
+                    slot: g.selected as i32,
+                }));
+            }
+            // PlayerList.placeNewPlayer: ClientboundUpdateRecipesPacket.
+            JOIN_RECIPES => {
+                let recipes = self.sync.recipes.clone();
+                self.guests[i].send(&raw(ids::UPDATE_RECIPES, recipes));
+            }
+            // PlayerList.sendPlayerPermissionLevel.
+            JOIN_PERMISSION => self.send_permission_level(i),
+            // ServerRecipeBook.sendInitialRecipeBook: each book's open and
+            // filtering flags, then every known recipe.
+            JOIN_BOOK => {
+                let g = &self.guests[i];
+                let book = &g.recipe_book;
+                let settings = (0..4)
+                    .flat_map(|b| [u8::from(book.open[b]), u8::from(book.filtering[b])])
+                    .collect();
+                g.send(&raw(ids::RECIPE_BOOK_SETTINGS, settings));
+                let add = self.sync.advancements.initial_recipe_book(book, &self.sync);
+                self.guests[i].send(&raw(ids::RECIPE_BOOK_ADD, add));
+            }
+            JOIN_LIST => {
+                let (name, uuid) = {
+                    let g = &self.guests[i];
+                    (g.name.clone(), g.uuid)
+                };
+                // The others hear of the newcomer before it joins the list.
+                let conn = self.guests[i].conn;
+                self.broadcast_except(
+                    conn,
+                    &C::SystemChat(play::SystemChat {
+                        content: yellow_names(
+                            "multiplayer.player.joined",
+                            vec![display_name(uuid, &name)],
+                        ),
+                        overlay: false,
+                    }),
+                );
+                self.guests[i].placed = true;
+                self.teleport(i, None);
+                let g = &self.guests[i];
+                g.send(&C::ServerData(play::ServerData {
+                    motd: literal(&self.lan.shared.motd()),
+                    icon: self.lan.shared.config.favicon.clone(),
+                }));
+            }
+            JOIN_INFO => {
+                let (name, uuid, mode) = {
+                    let g = &self.guests[i];
+                    (g.name.clone(), g.uuid, g.game_mode)
+                };
+                let conn = self.guests[i].conn;
+                // The player list: everyone already here, then the newcomer
+                // to all.
+                let mut entries = Vec::new();
+                if let Some(host) = ctx.host {
+                    entries.push(self.player_info(host.uuid, &host.name, host.game_mode, 0));
+                }
+                for o in self.guests.iter().filter(|o| o.conn != conn && o.placed) {
+                    entries.push(self.player_info(
+                        o.uuid,
+                        &o.name,
+                        o.game_mode,
+                        o.latency.load(Ordering::Relaxed),
+                    ));
+                }
+                self.guests[i].send(&C::PlayerInfoUpdate(play::PlayerInfoUpdate {
+                    actions: Self::INFO_ACTIONS,
+                    entries,
+                }));
+                let newcomer = play::PlayerInfoUpdate {
+                    actions: Self::INFO_ACTIONS,
+                    entries: vec![self.player_info(uuid, &name, mode, 0)],
+                };
+                self.broadcast(&C::PlayerInfoUpdate(newcomer));
+            }
+            JOIN_LEVEL => self.send_level_info(i, ctx),
+            _ => {
+                // ServerLevel.addNewPlayer: the chunk tracking starts at the
+                // player.
+                let g = &mut self.guests[i];
+                let (cx, cz) = g.chunk();
+                g.send(&C::SetChunkCacheCenter(play::SetChunkCacheCenter {
+                    x: cx,
+                    z: cz,
+                }));
+                g.center_sent = Some((cx, cz));
+                g.placed_at = self.ticks;
+                self.send_active_effects(i);
+                // ServerPlayer.sendPostEffects and initInventoryMenu.
+                self.guests[i].send(&raw(ids::POST_EFFECTS, vec![0]));
+                self.send_inventory(i);
+            }
+        }
+        crate::spans::add(Self::join_span(step), t.elapsed());
+        if step >= JOIN_REST {
+            self.guests[i].join_step = JOIN_DONE;
+        } else {
+            self.guests[i].join_step = step + 1;
+        }
     }
 
     /// ClientboundUpdateMobEffectPacket for one of the guest's effects.
@@ -917,7 +1008,7 @@ impl Hub {
 
     /// PlayerList.sendPlayerPermissionLevel: the op level as an entity event
     /// (24 + level), then the commands that level may use.
-    fn send_permission_level(&self, i: usize) {
+    fn send_permission_level(&mut self, i: usize) {
         let g = &self.guests[i];
         g.send(&C::EntityEvent(play::EntityEvent {
             id: g.entity_id,
@@ -945,6 +1036,7 @@ impl Hub {
     pub fn set_mod_commands(&mut self, key: u64, commands: serde_json::Value) {
         let resend = self.mod_commands.0 != commands;
         self.mod_commands = (commands, Some(key));
+        self.commands_cache.clear();
         if resend {
             for i in 0..self.guests.len() {
                 if self.guests[i].placed {
@@ -955,18 +1047,23 @@ impl Hub {
     }
 
     /// Commands.sendCommands: the command tree for this player.
-    fn send_commands(&self, i: usize) {
-        let g = &self.guests[i];
+    fn send_commands(&mut self, i: usize) {
+        // The tree for a permission level is the same packet every time: built
+        // and encoded once, copied after. Building it was 11.2 ms of a join's
+        // tick, before the join's own queue spread the rest.
+        let permission = self.guests[i].permission;
+        let dedicated = self.config.dedicated && !self.config.integrated;
+        if let Some(body) = self.commands_cache.get(&(permission, dedicated)) {
+            self.guests[i].sender.send(body.clone());
+            return;
+        }
         let packet = match &self.sync.commands {
-            Some(tree) => {
-                let dedicated = self.config.dedicated && !self.config.integrated;
-                tree.packet_with(
-                    g.permission,
-                    dedicated,
-                    &self.sync.builtin,
-                    &self.mod_commands.0,
-                )
-            }
+            Some(tree) => tree.packet_with(
+                permission,
+                dedicated,
+                &self.sync.builtin,
+                &self.mod_commands.0,
+            ),
             None => play::Commands {
                 nodes: vec![play::CommandNode {
                     kind: 0,
@@ -981,7 +1078,9 @@ impl Hub {
                 root: 0,
             },
         };
-        g.send(&C::Commands(packet));
+        let body = C::Commands(packet).encode();
+        self.commands_cache.insert((permission, dedicated), body.clone());
+        self.guests[i].sender.send(body);
     }
 
     /// ServerGamePacketListenerImpl.teleport: move the client and wait for its confirmation.
@@ -1195,6 +1294,9 @@ impl Hub {
     /// the chunks, block changes, containers and entities they see.
     pub fn tick_level(&mut self, ctx: &mut TickCtx) -> Vec<HostEvent> {
         let mut events = Vec::new();
+        // The joins queued since the last tick, a step at a time (a joining
+        // guest is not `here` yet, so this comes before the check below).
+        crate::spans::time("join_drain", || self.drain_join(ctx));
         for i in 0..self.guests.len() {
             if self.here(&self.guests[i]) {
                 self.process_inbox(i, ctx, &mut events);
@@ -1226,8 +1328,8 @@ impl Hub {
         }
         self.sync_world(ctx);
         crate::spans::time("lan_chunks", || self.update_chunks(ctx));
-        self.broadcast_light_changes(ctx.world);
-        self.broadcast_block_changes(ctx.world);
+        crate::spans::time("lan_light", || self.broadcast_light_changes(ctx.world));
+        crate::spans::time("lan_blocks", || self.broadcast_block_changes(ctx.world));
         // ServerGamePacketListenerImpl.tick: the actions handled since the last tick are
         // acknowledged after the block changes they made were sent, so a client's predicted
         // blocks settle on the server's states.
@@ -1413,29 +1515,49 @@ impl Hub {
             })
             .collect();
         self.encoder.warm(&columns);
-        let mut bodies: Vec<Vec<u8>> = columns
-            .iter()
-            .map(|c| self.encoder.body_in(c, world))
-            .collect();
+        // Encoding a column into its packet body is the expensive half of a
+        // chunk send, and the batch the client asks for grows as it keeps up:
+        // with the server's tick on the same page, a whole batch cost 80 ms of
+        // one tick when a world opened. Only the bodies that fit the budget
+        // are encoded; the rest of the batch stays queued for the next tick,
+        // so the hub never holds the tick for chunks.
+        const SEND_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+        let started = horizon_core::time::Instant::now();
+        let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(columns.len());
+        for column in &columns {
+            if !bodies.is_empty() && started.elapsed() >= SEND_BUDGET {
+                break;
+            }
+            bodies.push(self.encoder.body_in(column, world));
+        }
+        let encoded = bodies.len();
         for (i, taken, batch) in batches {
+            let pairs: Vec<(usize, usize)> = taken
+                .into_iter()
+                .zip(batch)
+                .filter(|&(_, body)| body < encoded)
+                .collect();
+            if pairs.is_empty() {
+                continue;
+            }
             let g = &mut self.guests[i];
-            let size = batch.len();
+            let size = pairs.len();
             g.batch_quota -= size as f32;
             g.send(&C::ChunkBatchStart(horizon_protocol::packets::Empty));
-            g.sender.send_many(batch.into_iter().map(|j| {
-                uses[j] -= 1;
-                if uses[j] == 0 {
-                    std::mem::take(&mut bodies[j])
+            g.sender.send_many(pairs.iter().map(|&(_, body)| {
+                uses[body] -= 1;
+                if uses[body] == 0 {
+                    std::mem::take(&mut bodies[body])
                 } else {
-                    bodies[j].clone()
+                    bodies[body].clone()
                 }
             }));
             g.send(&C::ChunkBatchFinished(play::ChunkBatchFinished {
                 size: size as i32,
             }));
             g.unacknowledged += 1;
-            for idx in taken.into_iter().rev() {
-                let key = g.chunk_queue.remove(idx);
+            for (idx, _) in pairs.iter().rev() {
+                let key = g.chunk_queue.remove(*idx);
                 g.sent_chunks.insert(key);
             }
         }
@@ -1505,7 +1627,32 @@ impl Hub {
         if log.is_empty() {
             return;
         }
-        let mut changes: Vec<((i32, i32), u32)> = log.drain().collect();
+        // A world that just opened changes the light of every column it has,
+        // all in one tick: each one is encoded against the column and sent
+        // (5.2 MB for a view). Only what fits the budget is taken out of the
+        // map, which merges later changes into the same entry, so the rest is
+        // sent on the following ticks in the order it would have been sent.
+        const LIGHT_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+        let started = horizon_core::time::Instant::now();
+        // A bounded batch, so a view's changes arriving every tick never make
+        // this sort the whole map.
+        let mut keys: Vec<(i32, i32)> = Vec::new();
+        for &key in log.keys() {
+            keys.push(key);
+            if keys.len() >= 64 {
+                break;
+            }
+        }
+        keys.sort_unstable();
+        let mut changes: Vec<((i32, i32), u32)> = Vec::new();
+        for key in keys {
+            if !changes.is_empty() && started.elapsed() >= LIGHT_BUDGET {
+                break;
+            }
+            if let Some(sections) = log.remove(&key) {
+                changes.push((key, sections));
+            }
+        }
         changes.sort_unstable();
         for ((x, z), sections) in changes {
             let tracked = |g: &Guest, x: i32, z: i32| g.sent_chunks.contains(&(x, z));
@@ -2121,8 +2268,18 @@ impl Hub {
         let g = &mut self.guests[i];
         g.first_good = g.position;
         g.known_moves = g.received_moves;
+        // A guest's packets are handled for at most this long a tick: a
+        // client joining a fresh world sends hundreds of chunk-batch acks at
+        // once, and handling the lot was 36 ms of the tick it landed in
+        // (`lan_level`). What is left stays in the inbox and is handled in
+        // order next tick, as if the network had delivered it a tick later.
+        const INBOX_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+        let deadline = horizon_core::time::Instant::now() + INBOX_BUDGET;
         let mut budget = 400;
         while budget > 0 {
+            if horizon_core::time::Instant::now() >= deadline {
+                break;
+            }
             let Some(packet) = self.guests[i].inbox.pop_front() else {
                 break;
             };
@@ -2920,7 +3077,7 @@ mod tests {
             ] {
                 let sent = FxHashSet::default();
                 let mut queue = Vec::new();
-                let start = std::time::Instant::now();
+                let start = horizon_core::time::Instant::now();
                 let moves = 200;
                 for step in 0..moves {
                     // Nothing sent yet (an explorer waiting on generation).

@@ -405,6 +405,25 @@ pub(super) fn make_streaming(
                 res.biomes(),
             )
         });
+    // Who generates chunks, and on which threads. A streamer's workers are
+    // held for the life of the page, so the pool reserves what the blocking
+    // jobs need first: the integrated server's loop, the hub, the connection
+    // reader and LAN serving (`ESSENTIAL`), plus the two workers the server's
+    // own streamer is given (`RESERVED`). The client's streamer only ever
+    // dispatches beyond that, which is what keeps a page from holding every
+    // worker in streamers and starving its reader — the failure mode a page
+    // without the reservation showed by never leaving `pending_entry`.
+    let pool = horizon_threads::pool_size();
+    let server_streamers = if pool >= 8 { 2 } else { 0 };
+    let essential = 4.min(pool);
+    horizon_threads::set_reserved((essential + server_streamers).min(pool), essential);
+    let stream_threads = if options.execution_role.is_client() {
+        res.threads()
+    } else if pool > 0 {
+        2
+    } else {
+        1
+    };
     let mut streaming = if let Some(inner) = debug {
         Streaming::new(
             Arc::new(Persistent {
@@ -414,7 +433,7 @@ pub(super) fn make_streaming(
                 biomes: res.biomes().clone(),
             }),
             pack.context.clone(),
-            res.threads(),
+            stream_threads,
         )
     } else if let Some(inner) = flat {
         Streaming::new(
@@ -425,7 +444,7 @@ pub(super) fn make_streaming(
                 biomes: res.biomes().clone(),
             }),
             pack.context.clone(),
-            res.threads(),
+            stream_threads,
         )
     } else if options.test_terrain && dim == Dim::Overworld {
         let inner = Arc::new(TestTerrain::new(pack.assets.registry, res.biomes())?);
@@ -437,7 +456,7 @@ pub(super) fn make_streaming(
                 biomes: res.biomes().clone(),
             }),
             pack.context.clone(),
-            res.threads(),
+            stream_threads,
         )
     } else {
         // WorldOptions.generateStructures, from the world's settings.
@@ -464,7 +483,7 @@ pub(super) fn make_streaming(
                 biomes: res.biomes().clone(),
             }),
             pack.context.clone(),
-            res.threads(),
+            stream_threads,
         )
     };
     streaming.forced = save.load_forced_chunks();

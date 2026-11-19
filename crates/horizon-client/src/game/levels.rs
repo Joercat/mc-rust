@@ -372,6 +372,10 @@ impl Game<'_> {
         let Some(threshold) = self.options.spikes else {
             return self.tick_server(paused);
         };
+        // Anything the frame recorded on this thread before the tick (the
+        // page runs both on one thread) is not the tick's: take it first, so
+        // a slow-tick line names what the tick itself spent.
+        let _ = horizon_client::spans::take();
         let (started, cpu) = (Instant::now(), horizon_client::spans::thread_cpu());
         let result = self.tick_server(paused);
         let wall = started.elapsed().as_secs_f32() * 1000.0;

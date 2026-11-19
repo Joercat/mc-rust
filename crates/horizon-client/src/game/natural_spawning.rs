@@ -31,6 +31,10 @@ use std::collections::HashMap;
 pub(super) struct SpawnScratch {
     pub(super) candidates: Vec<(i32, i32)>,
     pub(super) seen: horizon_client::fast_hash::FxHashSet<(i32, i32)>,
+    /// Chunks the tick ran out of spawn budget for, tried before the fresh
+    /// candidates next tick: a whole view's attempts at once were 34 ms of the
+    /// tick a world opened on.
+    pub(super) backlog: Vec<(i32, i32)>,
 }
 
 /// A player in the level in place, as spawning and despawning see it.
@@ -510,22 +514,23 @@ impl<'a> Game<'a> {
         let mut pending = Vec::new();
         {
             let level = self.natural_level();
-            let counted: Vec<Counted> = self
-                .mobs
-                .iter()
-                .map(|m| Counted {
-                    entity: &m.kind.id,
-                    category: Category::from_name(&m.kind.category),
-                    block: [
-                        m.position.x.floor() as i32,
-                        m.position.y.floor() as i32,
-                        m.position.z.floor() as i32,
-                    ],
-                    is_mob: true,
-                    persistent: m.persistent
-                        || horizon_client::mobs::ai::requires_custom_persistence(m),
-                })
-                .collect();
+            let counted: Vec<Counted> = horizon_client::spans::time("spawn_counted", || {
+                self.mobs
+                    .iter()
+                    .map(|m| Counted {
+                        entity: &m.kind.id,
+                        category: Category::from_name(&m.kind.category),
+                        block: [
+                            m.position.x.floor() as i32,
+                            m.position.y.floor() as i32,
+                            m.position.z.floor() as i32,
+                        ],
+                        is_mob: true,
+                        persistent: m.persistent
+                            || horizon_client::mobs::ai::requires_custom_persistence(m),
+                    })
+                    .collect()
+            });
             let players = players
                 .iter()
                 .map(|p| SpawnPlayer {
@@ -533,8 +538,10 @@ impl<'a> Game<'a> {
                     spectator: p.spectator,
                 })
                 .collect();
-            let mut state = SpawnState::new(&level, spawnable, players, &counted, |cx, cz| {
-                self.world.chunks.contains_key(&(cx, cz))
+            let mut state = horizon_client::spans::time("spawn_state", || {
+                SpawnState::new(&level, spawnable, players, &counted, |cx, cz| {
+                    self.world.chunks.contains_key(&(cx, cz))
+                })
             });
             let categories = if spawn_mobs {
                 state.filtered_categories(spawn_enemies, self.world.game_time % 400 == 0)
@@ -547,28 +554,59 @@ impl<'a> Game<'a> {
                 scratch.candidates.swap(i, j);
             }
             if !categories.is_empty() {
-                for chunk in scratch.candidates.drain(..) {
-                    let mut spawn = |l: &GameLevel, r: &SpawnRequest| {
-                        let spawned = l.game.finalize_spawned(r, &mut pending);
-                        if let Some(s) = &spawned {
-                            l.pending.borrow_mut().push(s.bounds);
+                // Spawn attempts are bounded per tick: the ones the budget does
+                // not reach go to the scratch's backlog and are tried first
+                // next tick, so a view that just loaded neither freezes the
+                // tick nor loses its attempts. The counts in `state` still
+                // decide every attempt, so nothing is spawned twice.
+                const SPAWN_BUDGET: std::time::Duration =
+                    std::time::Duration::from_millis(4);
+                horizon_client::spans::time("spawn_attempts", || {
+                    let deadline = horizon_core::time::Instant::now() + SPAWN_BUDGET;
+                    let mut queue: Vec<(i32, i32)> = std::mem::take(&mut scratch.backlog);
+                    queue.append(&mut scratch.candidates);
+                    let mut done = 0;
+                    for &chunk in &queue {
+                        if horizon_core::time::Instant::now() >= deadline {
+                            break;
                         }
-                        spawned
-                    };
-                    spawn_selection::spawn_for_chunk(
-                        &level,
-                        &mut random,
-                        &mut state,
-                        &categories,
-                        chunk,
-                        &mut spawn,
-                        &mut |_| {},
-                    );
-                }
+                        done += 1;
+                        let mut spawn = |l: &GameLevel, r: &SpawnRequest| {
+                            let spawned = l.game.finalize_spawned(r, &mut pending);
+                            if let Some(s) = &spawned {
+                                l.pending.borrow_mut().push(s.bounds);
+                            }
+                            spawned
+                        };
+                        spawn_selection::spawn_for_chunk(
+                            &level,
+                            &mut random,
+                            &mut state,
+                            &categories,
+                            chunk,
+                            &mut spawn,
+                            &mut |_| {},
+                        );
+                    }
+                    scratch.backlog = queue.split_off(done);
+                });
             }
         }
         self.world.random = random;
-        self.add_spawned(pending, false);
+        horizon_client::spans::time("spawn_add", || {
+            // Each mob added costs its first tick, which is the expensive one:
+            // a view's worth of mobs arriving in one tick made that tick 88 ms.
+            // A few are added per tick instead; the rest keep their positions
+            // and arrive over the next ticks.
+            const ADD_PER_TICK: usize = 6;
+            let mut backlog = std::mem::take(&mut self.spawn_add_backlog);
+            backlog.extend(pending);
+            let mut ready = Vec::new();
+            let take = backlog.len().min(ADD_PER_TICK);
+            ready.extend(backlog.drain(..take));
+            self.add_spawned(ready, false);
+            self.spawn_add_backlog = backlog;
+        });
         self.spawn_scratch = scratch;
     }
     /// `NoiseBasedChunkGenerator.spawnOriginalMobs`: creature packs for a

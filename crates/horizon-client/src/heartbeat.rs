@@ -69,6 +69,12 @@ fn run(endpoint: &str) {
             }
         }
         // Woken early by `set_lan`; a spurious wake only sends one ping more.
+        // A page worker has no parker with a clock (`park_timeout` traps on
+        // wasm), so it waits on the portable clock and sends the next state
+        // one interval later.
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::park_timeout(wait);
+        #[cfg(target_arch = "wasm32")]
+        horizon_core::sync::sleep(wait);
     }
 }

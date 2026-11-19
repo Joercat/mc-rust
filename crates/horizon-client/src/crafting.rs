@@ -1737,14 +1737,14 @@ mod tests {
         let stacks: Vec<ItemStack> = (0..1000)
             .map(|n| ItemStack::new(&format!("minecraft:item_{}", n % 400), 1))
             .collect();
-        let t = std::time::Instant::now();
+        let t = horizon_core::time::Instant::now();
         let a = stacks
             .iter()
             .filter(|s| recipes.cook_scan("smelting", s).cloned().is_some())
             .count();
         let before = t.elapsed().as_secs_f64() * 1e3;
         recipes.cook("smelting", &stacks[0]);
-        let t = std::time::Instant::now();
+        let t = horizon_core::time::Instant::now();
         let b = stacks
             .iter()
             .filter(|s| recipes.cook("smelting", s).is_some())

@@ -787,12 +787,15 @@ impl Game<'_> {
             .map(|(id, at, w, h)| (id, at, w as f32, h as f32))
             .collect();
         let mut portal_sections = std::mem::take(&mut self.portals.sections);
-        for (id, to, width, height) in items.into_iter().chain(mobs).chain(vehicles) {
-            let from = self.portals.before.get(&id).copied().unwrap_or(to);
-            if let Some(pos) = self.swept_portal(from, to, width, height, &mut portal_sections) {
-                inside.push((id, pos));
+        horizon_client::spans::time("portals_sweep", || {
+            for (id, to, width, height) in items.into_iter().chain(mobs).chain(vehicles) {
+                let from = self.portals.before.get(&id).copied().unwrap_or(to);
+                if let Some(pos) = self.swept_portal(from, to, width, height, &mut portal_sections)
+                {
+                    inside.push((id, pos));
+                }
             }
-        }
+        });
         self.portals.sections = portal_sections;
         for (id, pos) in inside {
             self.portals

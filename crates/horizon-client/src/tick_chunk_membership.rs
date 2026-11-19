@@ -58,6 +58,12 @@ impl TickChunkMembership {
         std::mem::take(&mut self.added)
     }
 
+    /// Whether a chunk added since the last registration still owes its ticks
+    /// (the registration is spread over ticks when a view arrives at once).
+    pub fn has_added(&self) -> bool {
+        !self.added.is_empty()
+    }
+
     /// Retain scratch capacity after registration.
     pub fn recycle_added(&mut self, mut added: Vec<Key>) {
         added.clear();

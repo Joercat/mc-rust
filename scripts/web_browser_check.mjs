@@ -609,8 +609,28 @@ async function runSession({ label, stripIsolation, reload }) {
         `ceiling ${((recovered.renderer || {}).scale_cap || 0).toFixed(2)} with no load`,
     );
   }
-  if (scaleOf(dropped) > 0.5) {
-    fail(`${label}: a 2 ms budget only reached a scale of ${scaleOf(dropped).toFixed(2)}`);
+  // A budget no frame can meet has exactly one correct outcome now: sustained
+  // slowness steps the scale below the configured ceiling and leaves it there,
+  // with the pixel count following the scale. It must never sit at the ceiling.
+  const capUnderLoad = (dropped.renderer || {}).scale_cap || 0;
+  const atCeiling = scaleOf(dropped) >= capUnderLoad - 0.001;
+  if (atCeiling) {
+    fail(
+      `${label}: the scale stayed at ${scaleOf(dropped).toFixed(2)} under a 2 ms budget, ` +
+        `so sustained over-budget frames never reduced the resolution`,
+    );
+  }
+  const pixelsUnderLoad = (dropped.renderer || {}).pixels || 0;
+  const screenUnderLoad = (dropped.renderer || {}).screen_pixels || 0;
+  const expected = Math.round(screenUnderLoad * scaleOf(dropped) * scaleOf(dropped));
+  if (Math.abs(pixelsUnderLoad - expected) > 2) {
+    fail(
+      `${label}: ${pixelsUnderLoad} pixels rendered at scale ${scaleOf(dropped).toFixed(2)}, ` +
+        `expected ${expected} (scale^2 of ${screenUnderLoad})`,
+    );
+  }
+  if (!Boolean((dropped.renderer || {}).over_budget)) {
+    fail(`${label}: a 2 ms budget did not report over-budget frames`);
   }
   const phases = await page.evaluate(() => window.__phases);
   console.log(`  [${label}] phases: ${phases.map((p) => `${p.at}ms ${p.text}`).join(" | ")}`);

@@ -1198,7 +1198,7 @@ mod tests {
         let mut graph = Graph::default();
         let mut best = f64::MAX;
         for _ in 0..12 {
-            let started = std::time::Instant::now();
+            let started = horizon_core::time::Instant::now();
             graph.search(&o.columns, camera, 34, &mut vis, &mut queue);
             best = best.min(started.elapsed().as_secs_f64() * 1000.0);
         }

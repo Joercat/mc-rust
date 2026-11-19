@@ -33,6 +33,7 @@ everything it already has and only reports what it could not fetch.
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -66,6 +67,11 @@ def std_lockfile() -> Path:
             f"install the component: rustup +{TOOLCHAIN} component add rust-src"
         )
     return lock
+
+
+def depot_dir() -> Path:
+    """`rust-src`'s own vendored copies of the crates `std` was built against."""
+    return std_lockfile().parent / "vendor"
 
 
 def package_checksum(dest: Path) -> str:
@@ -139,13 +145,54 @@ def repair(name: str, version: str, dest: Path) -> bool:
     return True
 
 
+def depot_copy(name: str, version: str, dest: Path, checksum: str) -> bool:
+    """Replace a vendored crate with `rust-src`'s copy of the same release.
+
+    `library/vendor` is not just a mirror of crates.io: `cfg-if`, `adler2`,
+    `hashbrown`, `miniz_oxide` and `rustc-demangle` declare
+    `core = { package = "rustc-std-workspace-core" }` for their
+    `rustc-dep-of-std` feature, and that dependency is what links them against
+    the `core` the `std` build has just rebuilt. The crates.io release of the
+    same version has no such dependency, so it resolves `core` to the
+    *sysroot's* prebuilt copy instead and the threaded build stops with
+
+        error[E0152]: duplicate lang item in crate `core`: `sized`
+
+    A crate that is already vendored with a valid checksum is replaced anyway:
+    its checksum was fine, its contents were not.
+    """
+    if not checksum:
+        return False
+    source = depot_dir() / f"{name}-{version}"
+    try:
+        manifest = (source / "Cargo.toml").read_text()
+    except OSError:
+        return False
+    if "rustc-std-workspace" not in manifest:
+        # A plain crates.io release: the vendored copy is the same, and
+        # `assemble_vendor.py` may have patched it, so leave it alone.
+        return False
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(source, dest)
+    files = {}
+    for path in dest.rglob("*"):
+        if path.is_file() and path.name != ".cargo-checksum.json":
+            relative = str(path.relative_to(dest))
+            files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (dest / ".cargo-checksum.json").write_text(
+        json.dumps({"files": files, "package": checksum})
+    )
+    return True
+
+
 def main() -> int:
     lock = std_lockfile()
     with lock.open("rb") as handle:
         packages = tomllib.load(handle).get("package", [])
     VENDOR.mkdir(parents=True, exist_ok=True)
 
-    fetched = repaired = skipped = 0
+    fetched = repaired = skipped = from_std = 0
     failed = []
     for entry in packages:
         name, version = entry.get("name"), entry.get("version")
@@ -155,6 +202,13 @@ def main() -> int:
             # from rust-src itself, not from the vendor directory.
             continue
         dest = VENDOR / f"{name}-{version}"
+        # rust-src's copy first, for the releases it patched for the `std`
+        # build; everything else keeps the vendored copy it already has.
+        if entry.get("checksum") and depot_copy(
+            name, version, dest, entry["checksum"]
+        ):
+            from_std += 1
+            continue
         if package_checksum(dest):
             skipped += 1
             continue
@@ -172,8 +226,9 @@ def main() -> int:
             failed.append(f"{name} {version}")
 
     print(
-        f"std's crates in {VENDOR}: {fetched} fetched, {repaired} repaired, "
-        f"{skipped} already there" + (f", {len(failed)} failed" if failed else "")
+        f"std's crates in {VENDOR}: {fetched} fetched, {from_std} from rust-src, "
+        f"{repaired} repaired, {skipped} already there"
+        + (f", {len(failed)} failed" if failed else "")
     )
     if failed:
         print("missing: " + ", ".join(failed), file=sys.stderr)

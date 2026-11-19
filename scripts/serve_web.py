@@ -59,6 +59,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_file(head_only=True)
 
     def send_file(self, head_only):
+        # The platform's preview bootstrap (…/__freebuff_preview?ticket=…) is
+        # forwarded here by the preview edge. The ticket is checked at the edge,
+        # so answer with the app itself: a 404 here leaves the panel's tab on an
+        # error page instead of the game.
+        if self.path.split("?", 1)[0].rstrip("/").endswith("__freebuff_preview"):
+            self.path = "/"
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             return super().do_HEAD() if head_only else super().do_GET()
@@ -91,6 +97,9 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5173
     handler = functools.partial(Handler, directory=ROOT)
     socketserver.TCPServer.allow_reuse_address = True
+    # The page opens ~8 sockets at once (wasm + glue + 6 workers); the
+    # default backlog of 5 drops them and stalls a reload.
+    socketserver.ThreadingTCPServer.request_queue_size = 128
     with socketserver.ThreadingTCPServer(("0.0.0.0", port), handler) as httpd:
         print(f"Horizon web build on http://0.0.0.0:{port}/ (serving {ROOT})", flush=True)
         httpd.serve_forever()

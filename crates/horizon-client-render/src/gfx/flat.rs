@@ -115,7 +115,11 @@ pub struct Flat {
 /// (9,300 draws) the CPU saves 1.3 ms. The bar was 4,096 draws when they
 /// were 2.2 to 2.5 per section; a section's draw count now depends on the
 /// sides it shows the eye (`mesher::Sides`), so it counts sections.
-const MIN_SECTIONS: usize = 1600;
+// Fewest drawn sections the merged path runs at. Measured on a real WebGPU
+// adapter: at 85 drawn sections it already cut submissions 105 -> 66 with a
+// frame indistinguishable from the per-section one, so 1600 never let it run
+// in any view a player stands in.
+const MIN_SECTIONS: usize = 64;
 
 /// Whether flat draws apply: the backend emulates multi-draw, and vertex
 /// shaders can read storage buffers large enough for an index page.
@@ -126,10 +130,24 @@ pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
         Ok("1") => return supported(adapter, device),
         _ => {}
     }
-    adapter.get_info().backend == wgpu::Backend::Metal && supported(adapter, device)
+    // Metal and the browser's WebGPU both run the merged section draws. Left
+    // out, the web build fell back to one indirect draw per section, which is
+    // CPU submission bound: an M1 Pro and software GL then show the same frame.
+    matches!(
+        adapter.get_info().backend,
+        wgpu::Backend::Metal | wgpu::Backend::BrowserWebGpu
+    ) && supported(adapter, device)
 }
 
 fn supported(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
+    // The browser's WebGPU describes itself with limits, not downlevel flags
+    // (those are a native-backend notion and are left unset there): gating on
+    // them is what kept the merged draws off in every browser.
+    if adapter.get_info().backend == wgpu::Backend::BrowserWebGpu {
+        let limits = device.limits();
+        return limits.max_storage_buffers_per_shader_stage >= 3
+            && limits.max_storage_buffer_binding_size >= super::arena::PAGE_BYTES;
+    }
     let flags = adapter.get_downlevel_capabilities().flags;
     let limits = device.limits();
     flags.contains(wgpu::DownlevelFlags::VERTEX_STORAGE | wgpu::DownlevelFlags::COMPUTE_SHADERS)

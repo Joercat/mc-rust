@@ -243,9 +243,26 @@ impl Game<'_> {
     }
     /// Spawn the entities of chunks that finished loading.
     pub(super) fn spawn_loaded_entities(&mut self) {
+        self.spawn_loaded_entities_until(None);
+    }
+    /// The tick's share of them: a world that just opened has a whole view's
+    /// saved entities to spawn at once (26.7 ms of one tick). The columns the
+    /// budget does not reach stay in `world.loaded_entities`, in order, and are
+    /// spawned on the following ticks.
+    pub(super) fn spawn_loaded_entities_tick(&mut self) {
+        self.spawn_loaded_entities_until(Some(std::time::Duration::from_millis(2)));
+    }
+    fn spawn_loaded_entities_until(&mut self, budget: Option<std::time::Duration>) {
         let loaded = std::mem::take(&mut self.world.loaded_entities);
         let player_uuid = self.level.player_uuid;
-        for (key, tags) in loaded {
+        let deadline = budget.map(|b| horizon_core::time::Instant::now() + b);
+        let mut rest = Vec::new();
+        let mut loaded = loaded.into_iter();
+        for (key, tags) in loaded.by_ref() {
+            if deadline.is_some_and(|d| horizon_core::time::Instant::now() >= d) {
+                rest.push((key, tags));
+                break;
+            }
             for tag in tags {
                 let kind = entity_nbt::kind(&tag).unwrap_or_default();
                 let uuid = entity_nbt::uuid(&tag);
@@ -462,6 +479,11 @@ impl Game<'_> {
                     _ => self.persist.unknown.entry(key).or_default().push(tag),
                 }
             }
+        }
+    
+        rest.extend(loaded);
+        if !rest.is_empty() {
+            self.world.loaded_entities.splice(0..0, rest);
         }
     }
     /// A saved mob and, under `Passengers`, the mobs riding it.

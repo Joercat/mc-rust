@@ -53,6 +53,10 @@ struct TaaResources {
 pub struct Post {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// The final copy's sampler: nearest, so a world rendered below the window's
+    /// size reaches the screen as crisp pixels rather than a smoothed upscale. At
+    /// 1:1 it samples texel centres, so a native-scale frame is unchanged.
+    copy_sampler: wgpu::Sampler,
     copy: wgpu::RenderPipeline,
     fxaa: wgpu::RenderPipeline,
     format: wgpu::TextureFormat,
@@ -65,6 +69,9 @@ pub struct Post {
     pub upscale: f32,
     /// TAA runs this frame (`jitter`): not on the title screen or under a shader pack.
     taa_on: bool,
+    /// The `always` the target was last prepared with, so a resize after a scale
+    /// change rebuilds it exactly as the frame would have.
+    prepared_always: bool,
     target: Option<WorldTarget>,
     taa_resources: Option<TaaResources>,
     /// Frames jittered so far (the Halton index), and which history the next resolve writes.
@@ -237,17 +244,25 @@ impl Post {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let copy_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Horizon post copy"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
         Self {
             copy: pipeline("fs_copy", &pipeline_layout, format),
             fxaa: pipeline("fs_fxaa", &pipeline_layout, format),
             layout,
             sampler,
+            copy_sampler,
             format,
             scale: 1.0,
             antialias: false,
             taa: false,
             upscale: 1.0,
             taa_on: false,
+            prepared_always: false,
             target: None,
             taa_resources,
             taa_frame: 0,
@@ -269,6 +284,12 @@ impl Post {
             output.map(|v| ((v as f32 / upscale).round() as u32).max(1)),
             output,
         )
+    }
+
+    /// The world's rendered size at the current scale: what `prepare` allocates
+    /// on the next frame.
+    pub fn scaled_size(&self, window: [u32; 2]) -> [u32; 2] {
+        self.sizes(window).0
     }
 
     /// TAA's sub-pixel jitter this frame, as a clip-space matrix to multiply into the
@@ -313,6 +334,7 @@ impl Post {
         window: [u32; 2],
         always: bool,
     ) -> Option<(wgpu::TextureView, wgpu::TextureView)> {
+        self.prepared_always = always;
         if self.scale == 1.0 && !self.antialias && !self.taa_on && !always {
             self.target = None;
             return None;
@@ -410,6 +432,14 @@ impl Post {
             .map(|t| (t.color.clone(), t.depth.clone()))
     }
 
+    /// Rebuilds the world target for the scale set now, the way the next frame
+    /// would: called on a scale step so the allocated texture matches the scale
+    /// before any frame draws into it, instead of one frame later.
+    pub fn resize_now(&mut self, device: &wgpu::Device, window: [u32; 2]) {
+        let always = self.prepared_always;
+        self.prepare(device, window, always);
+    }
+
     /// The size of the world's own target, when it has one.
     pub fn size(&self) -> Option<[u32; 2]> {
         self.target.as_ref().map(|t| t.size)
@@ -427,7 +457,7 @@ impl Post {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.copy_sampler),
                 },
             ],
         })

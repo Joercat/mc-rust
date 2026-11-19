@@ -6,6 +6,7 @@ use super::{Game, dispenser::entity_random};
 use horizon_client::{
     Result,
     assets::Properties,
+    blocks::BlockFacts,
     chunk::{HEIGHT, MIN_Y},
     collisions::{SceneCollisions, no_collision_or_liquid},
     world::World,
@@ -29,6 +30,7 @@ struct Columns<'a, 'r> {
     world: &'a World,
     properties: &'a Properties,
     binding: &'a BlockCollisionRegistry<'r>,
+    facts: &'a BlockFacts,
 }
 impl SpawnLevel for Columns<'_, '_> {
     fn min_y(&self) -> i32 {
@@ -67,6 +69,12 @@ impl SpawnLevel for Columns<'_, '_> {
                 .is_ok_and(|differs| !differs)
         })
     }
+    fn is_leaves(&self, x: i32, y: i32, z: i32) -> bool {
+        self.facts
+            .get(self.world.block(x, y, z))
+            .name
+            .contains("leaves")
+    }
 }
 
 impl Game<'_> {
@@ -75,6 +83,7 @@ impl Game<'_> {
             world: &self.world,
             properties: &self.pack.assets.properties,
             binding: self.collision,
+            facts: self.res.facts(),
         }
     }
     /// ChunkGenerator.getOrigin and getSpawnHeight of the overworld.
@@ -130,7 +139,16 @@ impl Game<'_> {
             }
             self.spawn_spiral.advance();
         }
-        Ok(Some([ox * 16 + 8, height, oz * 16 + 8]))
+        // `NoiseBasedChunkGenerator.getSpawnHeight`: the origin column's own
+        // ground, not a fixed height. A constant here puts the fallback spawn in
+        // the air whenever the terrain is not at that height.
+        let (x, z) = (ox * 16 + 8, oz * 16 + 8);
+        let y = if self.streaming.is_lit(ox, oz) {
+            level_respawn_pos(&self.spawn_columns(), x, z).map_or(height, |pos| pos[1])
+        } else {
+            height
+        };
+        Ok(Some([x, y, z]))
     }
     /// MinecraftServer.setInitialSpawn's bonus chest: BonusChestFeature.place
     /// in the spawn chunk, a chest with the spawn bonus loot and a torch on
@@ -305,6 +323,12 @@ impl Game<'_> {
     /// tick can't, so a candidate in a chunk not loaded yet is passed over,
     /// and `spawn` stays when the search never reaches a loaded column.
     pub(super) fn server_player_spawn(&self, spawn: [f64; 3]) -> [f64; 3] {
+        // `?spawn=x,y,z`: the page pinned the spawn column, so this player
+        // starts exactly there (a testing hook: a fall test, or a replay of a
+        // walked route). Vanilla's spread around the world spawn is skipped.
+        if let Some([x, y, z]) = crate::game::web_pin_spawn() {
+            return [f64::from(x) + 0.5, f64::from(y), f64::from(z) + 0.5];
+        }
         let suggestion = spawn.map(|v| v.floor() as i32);
         let mut finder = self.spawn_finder(suggestion);
         while let Some(candidate) = finder.next_candidate() {
