@@ -22,6 +22,54 @@ Query parameters:
 The bottom-right readout shows the state, FPS, chunks and meshed sections; the
 browser console carries the engine's log.
 
+## Running it on your own machine
+
+The hosted route and the local route are the two ways to get the threaded build
+in your own browser on your own hardware. The panel's embed is neither: it is
+single-threaded by spec (see *Known limitations*) and it is drawn on the
+server. A clean clone is enough for the local one — no toolchain, only
+`python3`:
+
+```sh
+git clone --depth 1 --branch threaded-wasm https://github.com/Joercat/mc-rust
+cd mc-rust
+curl -fL -o public/horizon-vfs.bin \
+  https://github.com/Joercat/mc-rust/releases/download/web-assets-2026-11-01/horizon-vfs.bin
+python3 scripts/serve_web.py 5173     # http://localhost:5173/
+```
+
+The pack is a build output and is not in the branch (`render_build.sh` downloads
+the same release asset from `HORIZON_VFS_URL`); the clone carries both engines,
+the page and their glue. `localhost` is a secure context and the script sends
+`COOP: same-origin` / `COEP: require-corp`, which is all the threaded module
+needs — no ticket, no preview origin, no panel.
+
+Measured on `a4029b4` (2026-11-19) from a fresh `--depth 1` clone in `/tmp` with
+that 419557970-byte pack, headless Chromium:
+
+- `GET /` 200, `cross-origin-opener-policy: same-origin`,
+  `cross-origin-embedder-policy: require-corp`,
+  `cross-origin-resource-policy: cross-origin`; `crossOriginIsolated === true`
+  and `SharedArrayBuffer` present.
+- the boot log read `wasm engine ready (threaded, build 2026-11-05.41)`,
+  `worker threads: 7 of 7 (8 cores)` (the pool is cores minus one),
+  `resource pack: 400.1 MB`, `mounted 29527 virtual files`, `event loop running`.
+- `__horizon_status` read `state: "title"`, `frames: 11673`, `fps: 60.0`,
+  `threads: 7`, `threads_idle: 5`, `renderer.backend: "browserwebgpu"` — the
+  render loop is running on the threaded engine, not on the frame.
+- no request failed and no page error was raised. The 404 in the console is the
+  browser's own `/favicon.ico`. In a GPU-less VM the software WebGPU adapter
+  also raises one `on_submitted_work_done ... A valid external Instance
+  reference no longer exists` per submitted frame, and the **single-threaded**
+  engine raises exactly the same one on the same adapter (51 in 6 s at 25 fps,
+  page still drawing), so that line belongs to software WebGPU, not to the
+  threaded build; a machine with a real adapter does not go through it.
+
+The hosted route is the Render service in `render.yaml` (branch
+`threaded-wasm`), which sets the same two headers; it answered `503`
+`x-render-routing: suspend-by-user` on 2026-11-19, so it needs to be resumed
+from the Render dashboard before it can be used again.
+
 ## Offline only
 
 The web build has no online features. Multiplayer, LAN, Realms and the profile
