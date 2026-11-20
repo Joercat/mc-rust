@@ -5,6 +5,9 @@ The page needs cross-origin isolation headers (WebGPU + SharedArrayBuffer) and
 `application/wasm`; the engine is a 40 MB wasm module and the resource pack a
 33 MB archive, so text assets are also served gzip-compressed (a `.gz` next to
 the file, written on first request).
+
+`--fetch` downloads the resource pack (a build output, not in the branch) from
+the release before serving, so a fresh clone needs one command.
 """
 import functools
 import gzip
@@ -12,8 +15,63 @@ import http.server
 import os
 import socketserver
 import sys
+import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public")
+PACK = os.path.join(ROOT, "horizon-vfs.bin")
+PACK_MAGIC = b"HZVFS001"
+MIN_PACK = 50 * 1000 * 1000
+PACK_URL = os.environ.get(
+    "HORIZON_VFS_URL",
+    "https://github.com/Joercat/mc-rust/releases/download/"
+    "web-assets-2026-11-01/horizon-vfs.bin",
+)
+
+
+def pack_present():
+    """A complete pack, not a placeholder or a half transfer."""
+    try:
+        with open(PACK, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            return size >= MIN_PACK and f.read(len(PACK_MAGIC)) == PACK_MAGIC
+    except OSError:
+        return False
+
+
+def fetch_pack():
+    """Download the pack into place, renamed only once it is complete."""
+    if pack_present():
+        print(f"resource pack already here: {PACK} ({os.path.getsize(PACK) // 1000000} MB)")
+        return
+    part = PACK + ".part"
+    print(f"downloading the resource pack (~400 MB, once) from {PACK_URL}", flush=True)
+    try:
+        with urllib.request.urlopen(PACK_URL) as src, open(part, "wb") as dst:
+            advertised = src.headers.get("Content-Length")
+            total = int(advertised) if advertised else 0
+            done = 0
+            mark = 64 << 20
+            while chunk := src.read(1 << 20):
+                dst.write(chunk)
+                done += len(chunk)
+                if done >= mark:
+                    percent = f", {done * 100 // total}%" if total else ""
+                    print(f"  {done // 1000000} MB{percent}", flush=True)
+                    mark += 64 << 20
+    except OSError as error:
+        sys.exit(f"download failed: {error}\n  Set HORIZON_VFS_URL to another pack URL, or put the pack at {PACK} yourself.")
+    with open(part, "rb") as f:
+        magic = f.read(len(PACK_MAGIC))
+    size = os.path.getsize(part)
+    if magic != PACK_MAGIC or size < MIN_PACK:
+        os.unlink(part)
+        sys.exit(
+            f"{PACK_URL} did not return a resource pack "
+            f"({size} bytes, starts {magic!r}); nothing was kept.\n"
+            "  Point HORIZON_VFS_URL at the real asset, or put the pack there yourself."
+        )
+    os.replace(part, PACK)
+    print(f"resource pack ready: {PACK} ({size // 1000000} MB)", flush=True)
 
 # Everything a browser can gzip quickly enough to be worth it.
 COMPRESSIBLE = {".wasm", ".js", ".mjs", ".html", ".css", ".json", ".txt", ".wgsl"}
@@ -93,8 +151,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
 
+USAGE = "usage: serve_web.py [port] [--fetch]"
+
+
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5173
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(USAGE)
+        print("  --fetch   download public/horizon-vfs.bin from the release if it is missing")
+        return
+    fetch = "--fetch" in args
+    args = [arg for arg in args if arg != "--fetch"]
+    if len(args) > 1:
+        sys.exit(USAGE)
+    if args and not args[0].isdigit():
+        sys.exit(USAGE)
+    port = int(args[0]) if args else 5173
+    if fetch:
+        fetch_pack()
+    elif not pack_present():
+        print(
+            f"no resource pack at {PACK}: the page will stop and say so.\n"
+            "  Run again with --fetch to download it, or put it there yourself.",
+            flush=True,
+        )
     handler = functools.partial(Handler, directory=ROOT)
     socketserver.TCPServer.allow_reuse_address = True
     # The page opens ~8 sockets at once (wasm + glue + 6 workers); the

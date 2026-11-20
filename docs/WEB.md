@@ -7,7 +7,7 @@ and the game runs the same code paths as the desktop build — world generation,
 terrain meshing, entities, the HUD, the menus, and saving to browser storage.
 
 ```sh
-python3 scripts/serve_web.py 5173     # then open http://localhost:5173/
+python3 scripts/serve_web.py --fetch 5173     # then open http://localhost:5173/
 ```
 
 Query parameters:
@@ -24,25 +24,32 @@ browser console carries the engine's log.
 
 ## Running it on your own machine
 
-The hosted route and the local route are the two ways to get the threaded build
-in your own browser on your own hardware. The panel's embed is neither: it is
-single-threaded by spec (see *Known limitations*) and it is drawn on the
-server. A clean clone is enough for the local one — no toolchain, only
-`python3`:
+This is the way to run the threaded build in your own browser on your own
+hardware: a clone and one command. The page is served by the checkout, so it
+runs on your GPU and your cores, in a top-level tab. Only `python3` is needed —
+no toolchain, no account, no host:
 
 ```sh
 git clone --depth 1 --branch threaded-wasm https://github.com/Joercat/mc-rust
 cd mc-rust
-curl -fL -o public/horizon-vfs.bin \
-  https://github.com/Joercat/mc-rust/releases/download/web-assets-2026-11-01/horizon-vfs.bin
-python3 scripts/serve_web.py 5173     # http://localhost:5173/
+python3 scripts/serve_web.py --fetch 5173     # http://localhost:5173/
 ```
 
-The pack is a build output and is not in the branch (`render_build.sh` downloads
-the same release asset from `HORIZON_VFS_URL`); the clone carries both engines,
-the page and their glue. `localhost` is a secure context and the script sends
-`COOP: same-origin` / `COEP: require-corp`, which is all the threaded module
-needs — no ticket, no preview origin, no panel.
+`--fetch` downloads the resource pack first — 419557970 bytes, the
+`web-assets-2026-11-01` release asset, the same file `render_build.sh` pulls
+from `HORIZON_VFS_URL` — and does nothing when `public/horizon-vfs.bin` is
+already there. The pack is a build output and is not in the branch; the clone
+carries both engines, the page and their glue. `localhost` is a secure context
+and the script sends `COOP: same-origin` / `COEP: require-corp`, which is all
+the threaded module needs — no ticket, no preview origin, no panel. On Windows,
+install Python 3 (`winget install Python.Python.3.12`) and run the same two
+commands in PowerShell.
+
+The browser keeps the engine and the pack in IndexedDB (`horizon-web-assets`,
+keyed by the hashes in `assets.json`), so one 400 MB download covers every
+later load on that machine: the server still sees the request, but the page
+answers it from storage without a body. `?nocache=1` is the way to ask for a
+fresh copy.
 
 Measured on `a4029b4` (2026-11-19) from a fresh `--depth 1` clone in `/tmp` with
 that 419557970-byte pack, headless Chromium:
@@ -65,10 +72,16 @@ that 419557970-byte pack, headless Chromium:
   page still drawing), so that line belongs to software WebGPU, not to the
   threaded build; a machine with a real adapter does not go through it.
 
-The hosted route is the Render service in `render.yaml` (branch
-`threaded-wasm`), which sets the same two headers; it answered `503`
-`x-render-routing: suspend-by-user` on 2026-11-19, so it needs to be resumed
-from the Render dashboard before it can be used again.
+A public URL is optional, and free hosting is not a way to serve this build.
+The pack is 400 MB for every browser that has not stored it yet, which spends a
+free tier in a handful of loads, and the two headers are not optional either:
+GitHub Pages cannot send `COOP`/`COEP` at all, so a page hosted there can only
+ever load the single-threaded module. The Render service in `render.yaml` is
+that configuration done properly (branch `threaded-wasm`, same two headers) and
+it is not a route to rely on: it answered `503` `x-render-routing:
+ suspend-by-user` on 2026-11-19, and its free bandwidth is spent after about
+five loads of the pack. The command above needs neither a host nor its
+bandwidth.
 
 ## Offline only
 
@@ -305,7 +318,7 @@ files at all, the page stops with the same message the desktop client gives.
   ```
   npm i playwright && npx playwright install chromium      # in a scratch folder
   PLAYWRIGHT_PATH=$PWD/scratch/node_modules/playwright/index.js \
-    node scripts/web_browser_check.mjs https://horizon-web-pna6.onrender.com/
+    node scripts/web_browser_check.mjs http://localhost:5173/
   ```
 
   The status readout the script polls is refreshed once a second; the script
@@ -316,21 +329,24 @@ files at all, the page stops with the same message the desktop client gives.
   headers `serve_web.py` sends, and `app.js` loads the single-threaded module
   and logs `single-threaded engine: this page is embedded by one that is not
   isolated`. The threaded build needs a **top-level** page: locally
-  `python3 scripts/serve_web.py 5173` (localhost is a secure context and the
-  server sends the headers), or a host that sends them, which `render.yaml`
-  configures for the Render service. The panel's embed is also drawn by the
-  server's GPU, not the machine the panel is open on, so it is the wrong place
-  to judge how the build performs on real hardware either way.
+  `python3 scripts/serve_web.py --fetch 5173` (localhost is a secure context
+  and the server sends the headers), or a host that sends them, which
+  `render.yaml` configures — see *Running it on your own machine* for why a
+  free tier is not enough for a 400 MB pack. The panel's embed is also drawn by
+  the server's GPU, not the machine the panel is open on, so it is the wrong
+  place to judge how the build performs on real hardware either way.
 - A public deployment that answers an error page can be the host and not the
   build. On 2026-11-19 `https://horizon-web-pna6.onrender.com/` answered
   `503` with `x-render-routing: suspend-by-user` and Render's own 256-byte
   "This service has been suspended by its owner" body for `/` and for
-  `/assets.json`; the engines and the pack in this tree are untouched by that.
-  Resume the service from the Render dashboard (Blueprint: `render.yaml`,
-  branch `threaded-wasm`) rather than rebuilding anything. A checkout without
-  the pack can fetch it the same way the Render build does — the release asset
+  `/assets.json`, and the free plan's bandwidth is spent by about five loads of
+  the 400 MB pack, so that URL is retired rather than something to repair: the
+  engines and the pack in this tree are untouched by it. A checkout without the
+  pack fetches the same asset the Render build downloaded —
+  `python3 scripts/serve_web.py --fetch 5173` reads
   `https://github.com/Joercat/mc-rust/releases/download/web-assets-2026-11-01/horizon-vfs.bin`
-  (419557970 bytes) is the `HORIZON_VFS_URL` target.
+  (419557970 bytes, the `HORIZON_VFS_URL` target) unless `HORIZON_VFS_URL`
+  names another.
 - The threaded module needs a nightly toolchain with `rust-src`
   (`-Z build-std`) and a cross-origin isolated page. The toolchain is pinned
   to `nightly-2026-10-30` because `-Z build-std` and these flags are tied to
