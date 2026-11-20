@@ -5,7 +5,7 @@
     "app.js": "4e62b998022065698bb8a7a9b37e903347ea742126c53b6de99a207dc195bf06",
     "threads.js": "d5c603777f2e88567774c172e6be66a7c21b21617d9c4880a3949c2281de7693",
     "thread-worker.js": "863fe35f3ba85508fe5d962a5c25a896574150fb13c33b49321b43b8b0a8842b",
-    "asset-cache.js": "c1044b0d99cd97183d9dae996e9952c6bc467d22dd5a07bef9fc8b323d0c1c8b",
+    "asset-cache.js": "f7993a1f789bd618caaa96514bb92c4f19ca4f2ebb7b6b64a3ce69d66237ca33",
     "horizon-client.js": "42c4d528972091e327a95bdf5f67a0a3418f6f4ca8b78d747dceaf27a0c8e69f",
     "horizon-client_bg.wasm": "88ec1dc03c126d7a39c34b04a6136998001627c5b5b51d365e3447d36b2972d9",
     "horizon-client-threaded.js": "ec28e8bed89abeaf92c4b1bc339290469dbdf497e2d3ab1d7fe902d0f783ed05",

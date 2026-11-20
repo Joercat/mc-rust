@@ -13,3 +13,6 @@
 /public/horizon-client-threaded.js
 /public/horizon-client-threaded_bg.wasm
 /public/*.gz
+
+# The staged site bundle: copies of public/ for a deployment (scripts/sites_bundle.py).
+/sites-bundle/

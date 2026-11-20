@@ -51,6 +51,36 @@ export function sha256Hex(bytes) {
   });
 }
 
+/// Reads a file the manifest publishes in parts — a host that cannot carry the
+/// 126 MB pack in one response lists the parts instead, and this joins them in
+/// order. The recorded size is the check that a part did not arrive short: a
+/// truncated body is otherwise indistinguishable from a complete one.
+export async function readParts(parts, size, fetchImpl, urlFor, onProgress) {
+  const chunks = [];
+  let received = 0;
+  for (const part of parts) {
+    const response = await fetchImpl(urlFor(part), { cache: "no-cache" });
+    if (!response.ok) throw new Error(`${part}: HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    chunks.push(bytes);
+    received += bytes.length;
+    if (size > 0) onProgress(Math.min(received / size, 0.999));
+  }
+  if (size > 0 && received !== size) {
+    throw new Error(
+      `${parts.length} part(s) made ${received} bytes, not ${size}: a part did not arrive whole`,
+    );
+  }
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  onProgress(1);
+  return out;
+}
+
 export async function readBody(response, onProgress) {
   const total = Number(response.headers.get("content-length") || 0);
   if (!response.body || total === 0) {
@@ -243,7 +273,9 @@ export function createAssetCache({
   }
 
   /// The bytes of `name`, from IndexedDB when this browser already has that
-  /// hash. `{ bytes, cached, key }`.
+  /// hash. `{ bytes, cached, key }`. A manifest entry is either the file's
+  /// SHA-256 or `{ sha256, size, parts }` for a file the host publishes in
+  /// parts.
   async function bytes(name, onProgress = () => {}) {
     let files = null;
     try {
@@ -252,7 +284,9 @@ export function createAssetCache({
       warn(`[horizon] no build manifest for ${name}; downloading it by URL`, error);
     }
     const bare = bareName(name);
-    const hash = files && typeof files[bare] === "string" ? files[bare] : null;
+    const entry = files ? files[bare] : null;
+    const parts = entry && typeof entry === "object" && Array.isArray(entry.parts) ? entry.parts : null;
+    const hash = typeof entry === "string" ? entry : (entry && entry.sha256) || null;
     const key = hash ? `sha256:${hash}` : null;
     if (key && db && !nocache) {
       try {
@@ -265,9 +299,14 @@ export function createAssetCache({
         warn(`[horizon] could not read ${name} from the cache`, error);
       }
     }
-    const response = await fetchImpl(urlFor(name), { cache: "no-cache" });
-    if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
-    const fetched = await readBody(response, onProgress);
+    let fetched;
+    if (parts && parts.length > 0) {
+      fetched = await readParts(parts, Number(entry.size) || 0, fetchImpl, urlFor, onProgress);
+    } else {
+      const response = await fetchImpl(urlFor(name), { cache: "no-cache" });
+      if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
+      fetched = await readBody(response, onProgress);
+    }
     // A file too big to store is used once and dropped: hashing it protects
     // nothing and copies 100 MB+ on the main thread, which is a visible stall.
     if (hash && fetched.length <= STORE_MAX) {
@@ -304,7 +343,8 @@ export function createAssetCache({
       const keep = new Set(["manifest"]);
       for (const name of names) {
         const bare = bareName(name);
-        const hash = recorded && recorded.files ? recorded.files[bare] : null;
+        const entry = recorded && recorded.files ? recorded.files[bare] : null;
+        const hash = typeof entry === "string" ? entry : (entry && entry.sha256) || null;
         keep.add(hash ? `sha256:${hash}` : `raw:${bare}`);
       }
       const stored = await allKeys(db);

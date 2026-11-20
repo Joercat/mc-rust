@@ -86,16 +86,88 @@ and read `phase` `ready` with the boot overlay carrying its `hidden` class,
 failed request. Started a second time with the pack in place it printed
 `resource pack already here: … (419 MB)` and served at once.
 
-A public URL is optional, and free hosting is not a way to serve this build.
-The pack is 400 MB for every browser that has not stored it yet, which spends a
-free tier in a handful of loads, and the two headers are not optional either:
-GitHub Pages cannot send `COOP`/`COEP` at all, so a page hosted there can only
-ever load the single-threaded module. The Render service in `render.yaml` is
-that configuration done properly (branch `threaded-wasm`, same two headers) and
-it is not a route to rely on: it answered `503` `x-render-routing:
- suspend-by-user` on 2026-11-19, and its free bandwidth is spent after about
-five loads of the pack. The command above needs neither a host nor its
-bandwidth.
+## A public URL, for a browser that cannot serve files
+
+    https://horizon-web-qi24g0-preview.freebuff.site
+
+Open it in a top-level tab. Nothing is installed and nothing runs on your
+machine but the browser: the page is served from a Freebuff Site (Cloudflare
+Workers) which sends the same `COOP`/`COEP` headers `serve_web.py` does, so the
+threaded engine runs there too. Usable from a Chromebook: a browser without a
+WebGPU adapter is moved to WebGL2 by `app.js` itself, and a device with four
+threads and a few gigabytes gets `?quality=low` automatically.
+
+The first load downloads the engine (33 MB) and the pack (126 MB, the one in
+`public/`); later loads keep the engine in IndexedDB and the pack in the
+browser's own HTTP cache, because every build output is stamped with the build
+(`?v=…`) and may be cached forever.
+
+### Why it is shaped like this
+
+A site takes assets of at most 10 MiB each, and this build has a 33 MB wasm
+module and a 126 MB pack, so those live in the site's bucket instead, in 8 MiB
+parts. The page asks for them one part at a time and joins them
+(`readParts` in `public/asset-cache.js`), and a join that is not the recorded
+size is an error rather than a quietly short pack.
+
+One 126 MB response is what this host cannot do. Handing the browser a single
+stream spliced together from the parts ends early — the runtime stops the body
+part way through and closes it cleanly, so the page received 57.9 MB of a
+126 MB pack and reported `mount_pack failed: pack raw slice out of bounds`
+with no network error to point at. With a declared length (`FixedLengthStream`)
+the body reset its HTTP/2 stream instead, at 23 MB and 69 MB on two tries,
+while HTTP/1.1 and the 33 MB engine were fine. One object per request has
+neither problem.
+
+The deployed `assets.json` is the one `scripts/sites_bundle.py` writes: the
+same build stamp and hashes as `public/assets.json`, except that the three big
+files name their own SHA-256, size and part URLs. Every hash in it is computed
+from the bytes that deployment serves.
+
+### Rebuilding or redeploying it
+
+```sh
+python3 scripts/sites_bundle.py            # sites-bundle/: worker, manifest, assets
+python3 scripts/sites_seed.py URL TOKEN    # the three big files, in parts
+```
+
+`deploy/sites/worker.js` is the host: it serves the staged assets with the
+isolation headers, streams `/__parts/<file>/<n>` out of the site's bucket
+(`env.FILES`), and answers `/horizon-vfs.bin` with a description of its parts.
+The seed routes are only live while the deployment carries a `SEED_TOKEN`
+secret; they write only the three published names, and a deployment without the
+secret is a plain static host again. `sites-bundle/seed-token.txt` is the file
+`scripts/sites_seed.py` reads; it is gitignored.
+
+### Measured on the live URL (2026-11-20)
+
+- `GET /` 200, `cross-origin-opener-policy: same-origin`,
+  `cross-origin-embedder-policy: require-corp`,
+  `cross-origin-resource-policy: cross-origin`; `crossOriginIsolated === true`
+  in the page.
+- `/horizon-vfs.bin` downloaded whole, 126398794 bytes in 7-12 s from the edge,
+  SHA-256 `366e3db7…` — the hash `public/assets.json` records; the threaded
+  wasm module `1e65089e…`, also byte-identical to `public/`. Each of the 16
+  pack parts answers `content-length: 8388608` (the last, 569674).
+- headless Chromium, cold cache: booted in 12.2 s, `wasm engine ready
+  (threaded, build 2026-11-05.41)`, `worker threads: 7 of 7 (8 cores)`,
+  `resource pack: 120.5 MB`, `mounted 29427 virtual files`, `event loop
+  running`; `__horizon_status` `state: "title"`, `threads: 7`, `error: null`.
+- the title screen then ran at 60 fps (`frames` 41 → 233 → 2033 at ten-second
+  samples) with no page error and no failed request; the console's software
+  WebGPU `on_submitted_work_done` lines are the VM's adapter, as recorded
+  above.
+- **Not verified from here:** the menu route. This VM's headless browser
+  receives the click (a `pointerdown` reaches the page, the canvas has focus)
+  but the game does not act on it, and a canvas screenshot in this VM comes out
+  blank white while the DOM overlay captures fine, so neither the click nor the
+  picture can be checked here. A world opened by URL (`?world=siteprobe`) does
+  report `state: "playing"` with `error: null` and frames climbing 116 → 1308
+  in twenty seconds — but with `chunks: 0` and a server tick of 0, and the
+  checkout served by `serve_web.py` on localhost reports exactly the same
+  numbers, so that is this VM (software WebGPU, and terrain streaming never
+  settling here), not the deployment. On hardware with a real GPU adapter the
+  same page runs the same code as the local route.
 
 ## Offline only
 
@@ -350,7 +422,9 @@ files at all, the page stops with the same message the desktop client gives.
   the server's GPU, not the machine the panel is open on, so it is the wrong
   place to judge how the build performs on real hardware either way.
 - A public deployment that answers an error page can be the host and not the
-  build. On 2026-11-19 `https://horizon-web-pna6.onrender.com/` answered
+  build. The Render URL recorded here on 2026-11-19 is retired; the URL under
+  *A public URL, for a browser that cannot serve files* replaces it. On
+  2026-11-19 `https://horizon-web-pna6.onrender.com/` answered
   `503` with `x-render-routing: suspend-by-user` and Render's own 256-byte
   "This service has been suspended by its owner" body for `/` and for
   `/assets.json`, and the free plan's bandwidth is spent by about five loads of
