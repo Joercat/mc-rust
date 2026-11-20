@@ -72,6 +72,20 @@ that 419557970-byte pack, headless Chromium:
   page still drawing), so that line belongs to software WebGPU, not to the
   threaded build; a machine with a real adapter does not go through it.
 
+Repeated on `570db6b` (2026-11-20) by running the documented command itself,
+from a fresh `--depth 1` clone in `/tmp` with no pack in it: `--fetch` printed
+its progress (`67 MB, 15%` … `402 MB, 95%`) and `resource pack ready:
+…/public/horizon-vfs.bin (419 MB)` after about six minutes on a 1 MB/s link,
+then served. `GET /` answered 200 with the same three headers and
+`crossOriginIsolated === true`; headless Chromium logged `wasm engine ready
+(threaded, build 2026-11-05.41)`, `worker threads: 7 of 7 (8 cores)`,
+`resource pack: 400.1 MB`, `mounted 29527 virtual files`, `event loop running`,
+and read `phase` `ready` with the boot overlay carrying its `hidden` class,
+`__horizon_status` `state: "title"`, `threads: 7`, `threads_idle: 5`,
+`renderer.backend: "browserwebgpu"`, `error: null` — no page error and no
+failed request. Started a second time with the pack in place it printed
+`resource pack already here: … (419 MB)` and served at once.
+
 A public URL is optional, and free hosting is not a way to serve this build.
 The pack is 400 MB for every browser that has not stored it yet, which spends a
 free tier in a handful of loads, and the two headers are not optional either:
